@@ -48,7 +48,7 @@ node index.js --id <UUID> --key <SECRET_KEY> -- <MCP_SERVER_COMMAND>
 
 ```bash
 node index.js \
-  --id eeaa7e08-7887-4044-9a27-e2753a99b3e5 \
+  --id 80b7da29-4c96-42fc-84e3-ae684d4b4b1d \
   --key helloworld \
   -- npx -y @modelcontextprotocol/server-filesystem <allow path>
 ```

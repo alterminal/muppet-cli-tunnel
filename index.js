@@ -26,9 +26,10 @@ ws.on("open", () => {
   console.log("WebSocket连接已建立");
   setTimeout(() => {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
+      console.log("send ping");
+      ws.send("ping");
     }
-  }, 30000);
+  }, 20000);
   mcpprocess.stdout.on("data", (data) => {});
 
   mcpprocess.stderr.on("data", (data) => {

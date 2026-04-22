@@ -58,5 +58,9 @@ ws.on("error", (error) => {
 });
 
 ws.on("close", (code, reason) => {
+  if (code == "1002") {
+    console.log(`WebSocket连接已关闭: ${code} - ${reason}`);
+    return;
+  }
   console.log(`WebSocket连接已关闭: ${code} - ${reason}`);
 });

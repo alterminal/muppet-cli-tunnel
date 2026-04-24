@@ -19,7 +19,7 @@ class MCPWebSocketClient {
     this.isManualClose = false;
 
     this.serverUrl =
-      options.serverUrl || "ws://localhost:4000/mcps/tunnels/websocket";
+      options.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket";
   }
 
   getUrl() {
@@ -39,7 +39,7 @@ class MCPWebSocketClient {
   }
 
   handleOpen() {
-    console.log("WebSocket連接已建立");
+    console.log("Muppet tunnel連接已建立");
     this.reconnectAttempts = 0; // 重置重連計數
 
     // 啟動子進程
@@ -203,7 +203,8 @@ function main() {
     cmd: cmd,
     maxReconnectAttempts: args.maxReconnect || 10,
     reconnectDelay: args.reconnectDelay || 3000,
-    serverUrl: args.serverUrl || "ws://localhost:4000/mcps/tunnels/websocket",
+    serverUrl:
+      args.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket",
   });
 
   // 優雅關閉處理

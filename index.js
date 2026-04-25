@@ -182,8 +182,17 @@ class MCPWebSocketClient {
   }
 }
 
+// 通過標準輸入詢問用戶
+function askQuestion(rl, question) {
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      resolve(answer.trim());
+    });
+  });
+}
+
 // 命令行參數解析和使用示例
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._;
 
@@ -197,9 +206,40 @@ function main() {
 
   console.log("執行的命令:", cmd);
 
+  // 創建 readline 接口用於標準輸入
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  let id = args.id;
+  let secretKey = args.key;
+
+  // 如果沒有提供 id，通過標準輸入詢問
+  if (!id) {
+    id = await askQuestion(rl, "請輸入 Tunnel ID (UUID): ");
+    if (!id) {
+      console.error("錯誤: ID 不能為空");
+      rl.close();
+      process.exit(1);
+    }
+  }
+
+  // 如果沒有提供 key，通過標準輸入詢問（輸入時隱藏密碼）
+  if (!secretKey) {
+    secretKey = await askQuestion(rl, "請輸入 Secret Key: ");
+    if (!secretKey) {
+      console.error("錯誤: Secret Key 不能為空");
+      rl.close();
+      process.exit(1);
+    }
+  }
+
+  rl.close();
+
   const client = new MCPWebSocketClient({
-    id: args.id,
-    secret_key: args.key,
+    id: id,
+    secret_key: secretKey,
     cmd: cmd,
     maxReconnectAttempts: args.maxReconnect || 10,
     reconnectDelay: args.reconnectDelay || 3000,

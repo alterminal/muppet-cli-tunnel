@@ -75,14 +75,6 @@ class MCPWebSocketClient {
         this.ws.send(line);
       }
     });
-
-    // 20秒後發送ping
-    // setTimeout(() => {
-    //   if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-    //     console.log("send ping");
-    //     this.ws.send("ping");
-    //   }
-    // }, 20000);
   }
 
   handleMessage(data) {

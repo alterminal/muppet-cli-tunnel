@@ -188,21 +188,26 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._;
 
-  if (cmd.length === 0) {
-    console.error("請提供要執行的命令");
-    console.log(
-      "用法: node script.js --id=<id> --key=<key> <command> [args...]",
-    );
-    process.exit(1);
-  }
-
-  console.log("執行的命令:", cmd);
-
   // 創建 readline 接口用於標準輸入
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
+
+  // 如果沒有提供命令，詢問用戶輸入
+  let finalCmd = cmd;
+  if (finalCmd.length === 0) {
+    const cmdInput = await askQuestion(rl, "請輸入要執行的命令: ");
+    if (!cmdInput) {
+      console.error("錯誤: 命令不能為空");
+      rl.close();
+      process.exit(1);
+    }
+    // 解析用戶輸入的命令（支援空格分隔的多個參數）
+    finalCmd = cmdInput.trim().split(/\s+/);
+  }
+
+  console.log("執行的命令:", finalCmd);
 
   let id = args.id;
   let secretKey = args.key;
@@ -232,7 +237,7 @@ async function main() {
   const client = new MCPWebSocketClient({
     id: id,
     secret_key: secretKey,
-    cmd: cmd,
+    cmd: finalCmd,
     maxReconnectAttempts: args.maxReconnect || 10,
     reconnectDelay: args.reconnectDelay || 3000,
     serverUrl:

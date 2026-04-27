@@ -17,6 +17,10 @@ class MCPWebSocketClient {
     this.reconnectDelay = options.reconnectDelay || 3000;
     this.shouldReconnect = true;
     this.isManualClose = false;
+    this.pingInterval = options.pingInterval || 30000; // 預設30秒ping一次
+    this.pingTimer = null;
+    this.missedPongs = 0;
+    this.maxMissedPongs = options.maxMissedPongs || 3; // 連續3次沒收到pong則斷開
 
     this.serverUrl =
       options.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket";
@@ -36,11 +40,43 @@ class MCPWebSocketClient {
     this.ws.on("message", this.handleMessage.bind(this));
     this.ws.on("error", this.handleError.bind(this));
     this.ws.on("close", this.handleClose.bind(this));
+    this.ws.on("pong", this.handlePong.bind(this));
+  }
+
+  startPing() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+    }
+    this.missedPongs = 0;
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this.missedPongs >= this.maxMissedPongs) {
+          console.log(`連續 ${this.maxMissedPongs} 次未收到pong，認為連接已斷開`);
+          this.ws.terminate();
+          return;
+        }
+        this.ws.ping();
+        this.missedPongs++;
+      }
+    }, this.pingInterval);
+  }
+
+  stopPing() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    this.missedPongs = 0;
+  }
+
+  handlePong() {
+    this.missedPongs = 0;
   }
 
   handleOpen() {
     console.log("Muppet tunnel連接已建立");
     this.reconnectAttempts = 0; // 重置重連計數
+    this.startPing(); // 啟動定期ping
 
     // 啟動子進程
     if (this.cmd.length === 0) {
@@ -106,6 +142,9 @@ class MCPWebSocketClient {
   }
 
   cleanup() {
+    // 停止ping
+    this.stopPing();
+
     // 關閉readline接口
     if (this.rl) {
       this.rl.close();

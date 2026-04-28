@@ -270,28 +270,52 @@ function mergeConfig(fileConfig, cliArgs) {
   return {
     // 配置文件中的值
     id: cliArgs.id || fileConfig.id,
-    secret_key: cliArgs.key || cliArgs["secret-key"] || fileConfig.secret_key || fileConfig.secretKey,
-    cmd: cliArgs._.length > 0 ? cliArgs._ : (fileConfig.cmd || []),
-    maxReconnectAttempts: cliArgs.maxReconnect || cliArgs["max-reconnect"] || fileConfig.maxReconnectAttempts || 10,
-    reconnectDelay: cliArgs.reconnectDelay || cliArgs["reconnect-delay"] || fileConfig.reconnectDelay || 3000,
-    serverUrl: cliArgs.serverUrl || cliArgs["server-url"] || fileConfig.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket",
-    pingInterval: cliArgs.pingInterval || cliArgs["ping-interval"] || fileConfig.pingInterval || 30000,
-    maxMissedPongs: cliArgs.maxMissedPongs || cliArgs["max-missed-pongs"] || fileConfig.maxMissedPongs || 3,
+    secret_key:
+      cliArgs.key ||
+      cliArgs["secret-key"] ||
+      fileConfig.secret_key ||
+      fileConfig.secretKey,
+    cmd: cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
+    maxReconnectAttempts:
+      cliArgs.maxReconnect ||
+      cliArgs["max-reconnect"] ||
+      fileConfig.maxReconnectAttempts ||
+      10,
+    reconnectDelay:
+      cliArgs.reconnectDelay ||
+      cliArgs["reconnect-delay"] ||
+      fileConfig.reconnectDelay ||
+      3000,
+    serverUrl:
+      cliArgs.serverUrl ||
+      cliArgs["server-url"] ||
+      fileConfig.serverUrl ||
+      "wss://www.alterminal.com/mcps/tunnels/websocket",
+    pingInterval:
+      cliArgs.pingInterval ||
+      cliArgs["ping-interval"] ||
+      fileConfig.pingInterval ||
+      30000,
+    maxMissedPongs:
+      cliArgs.maxMissedPongs ||
+      cliArgs["max-missed-pongs"] ||
+      fileConfig.maxMissedPongs ||
+      3,
   };
 }
 
 // 命令行參數解析和使用示例
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  
+
   // 讀取配置文件（默認為 config.json）
   const configPath = args.config || args.c || "config.json";
   const fileConfig = loadConfig(configPath);
-  
+
   if (Object.keys(fileConfig).length > 0) {
     console.log(`已從 ${configPath} 加載配置`);
   }
-  
+
   // 合併配置
   const config = mergeConfig(fileConfig, args);
   const cmd = config.cmd;

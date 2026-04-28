@@ -8,6 +8,7 @@
 - 🔄 **標準 IO 轉發** - 將本地 MCP 服務器的 stdin/stdout 與 WebSocket 消息雙向轉發
 - 🛡️ **身份驗證** - 支持 ID 和 Secret Key 的連接驗證
 - ⚡ **輕量級** - 依賴簡潔，運行高效
+- 📁 **配置文件支持** - 支持 JSON 配置文件，命令行參數可覆蓋配置
 
 ## 安裝
 
@@ -28,23 +29,81 @@ npm install
 
 ## 使用方法
 
-### 基本語法
+### 方式一：使用配置文件（推薦）
+
+創建 `config.json` 文件：
+
+```json
+{
+  "id": "your-tunnel-id-uuid",
+  "secret_key": "your-secret-key",
+  "cmd": [
+    "npx",
+    "-y",
+    "@modelcontextprotocol/server-filesystem",
+    "/path/to/allowed/dir"
+  ],
+  "serverUrl": "wss://www.alterminal.com/mcps/tunnels/websocket",
+  "maxReconnectAttempts": 10,
+  "reconnectDelay": 3000,
+  "pingInterval": 30000,
+  "maxMissedPongs": 3
+}
+```
+
+然後運行：
+
+```bash
+node index.js
+```
+
+### 方式二：使用命令行參數
 
 ```bash
 node index.js --id <UUID> --key <SECRET_KEY> -- <MCP_SERVER_COMMAND>
 ```
 
-### 參數說明
+### 方式三：指定自定義配置文件
 
-| 參數    | 說明                              | 必填 |
-| ------- | --------------------------------- | ---- |
-| `--id`  | 連接 ID (UUID 格式)               | ✅   |
-| `--key` | 密鑰，用於身份驗證                | ✅   |
-| `--`    | 分隔符，後面接 MCP 服務器啟動命令 | ✅   |
+```bash
+node index.js --config /path/to/custom-config.json
+# 或簡寫
+node index.js -c /path/to/custom-config.json
+```
+
+### 參數優先級
+
+配置加載順序（後面的覆蓋前面的）：
+
+1. 默認值
+2. 配置文件 (`config.json`)
+3. 命令行參數
+4. 交互式輸入（僅限未提供的必需參數）
+
+### 配置選項
+
+| 配置項                 | 命令行參數              | 說明                 | 默認值                                            |
+| ---------------------- | ----------------------- | -------------------- | ------------------------------------------------- |
+| `id`                   | `--id`                  | 連接 ID (UUID 格式)  | 必填                                              |
+| `secret_key`           | `--key`, `--secret-key` | 密鑰，用於身份驗證   | 必填                                              |
+| `cmd`                  | `--` 後的命令           | MCP 服務器啟動命令   | 必填                                              |
+| `serverUrl`            | `--server-url`          | WebSocket 服務器地址 | `wss://www.alterminal.com/mcps/tunnels/websocket` |
+| `maxReconnectAttempts` | `--max-reconnect`       | 最大重連次數         | `10`                                              |
+| `reconnectDelay`       | `--reconnect-delay`     | 重連延遲（毫秒）     | `3000`                                            |
+| `pingInterval`         | `--ping-interval`       | Ping 間隔（毫秒）    | `30000`                                           |
+| `maxMissedPongs`       | `--max-missed-pongs`    | 最大丟失 Pong 次數   | `3`                                               |
+| -                      | `--config`, `-c`        | 自定義配置文件路徑   | `config.json`                                     |
 
 ### 使用示例
 
-#### 文件系統 MCP 服務器
+#### 文件系統 MCP 服務器（配置文件方式）
+
+```bash
+# 先編輯 config.json 填入配置
+node index.js
+```
+
+#### 文件系統 MCP 服務器（命令行方式）
 
 ```bash
 node index.js \
@@ -59,6 +118,7 @@ node index.js \
 node index.js \
   --id your-uuid-here \
   --key your-secret-key \
+  --server-url wss://custom-server.com/ws \
   -- npx -y @modelcontextprotocol/server-sqlite /path/to/database.db
 ```
 
@@ -69,13 +129,14 @@ node index.js \
 3. **消息轉發** -
    - 將 MCP 服務器的 stdout 輸出轉發到 WebSocket
    - 將 WebSocket 接收到的消息寫入 MCP 服務器的 stdin
-4. **心跳檢測** - 每 20 秒發送一次 ping 消息保持連接
+4. **心跳檢測** - 每 30 秒發送一次 ping 消息保持連接
 
 ## 項目結構
 
 ```
 muppet-cli-tunnel/
 ├── index.js          # 主入口文件
+├── config.json       # 配置文件（可自定義）
 ├── package.json      # 項目配置
 ├── README.md         # 本文檔
 └── pnpm-lock.yaml    # 依賴鎖定文件
@@ -85,12 +146,6 @@ muppet-cli-tunnel/
 
 - [ws](https://github.com/websockets/ws) - WebSocket 客戶端實現
 - [minimist](https://github.com/minimistjs/minimist) - 命令行參數解析
-
-## 環境變量
-
-| 變量 | 說明                   | 默認值 |
-| ---- | ---------------------- | ------ |
-| -    | 目前不支持環境變量配置 | -      |
 
 ## 故障排除
 
@@ -111,9 +166,9 @@ muppet-cli-tunnel/
 
 ## 開發計劃
 
-- [ ] 支持配置文件方式啟動
+- [x] 支持配置文件方式啟動
 - [ ] 添加日誌級別控制
-- [ ] 支持重連機制
+- [x] 支持重連機制
 - [ ] 添加 TLS/SSL 支持
 
 ## 許可證

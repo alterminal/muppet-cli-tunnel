@@ -2,6 +2,8 @@ const WebSocket = require("ws");
 const parseArgs = require("minimist");
 const { spawn } = require("child_process");
 const readline = require("readline");
+const fs = require("fs");
+const path = require("path");
 
 class MCPWebSocketClient {
   constructor(options = {}) {
@@ -248,10 +250,51 @@ function askQuestion(rl, question) {
   });
 }
 
+// 讀取配置文件
+function loadConfig(configPath) {
+  try {
+    const fullPath = path.resolve(configPath);
+    if (!fs.existsSync(fullPath)) {
+      return {};
+    }
+    const content = fs.readFileSync(fullPath, "utf-8");
+    return JSON.parse(content);
+  } catch (error) {
+    console.error(`讀取配置文件失敗: ${error.message}`);
+    return {};
+  }
+}
+
+// 合併配置：命令行參數優先於配置文件
+function mergeConfig(fileConfig, cliArgs) {
+  return {
+    // 配置文件中的值
+    id: cliArgs.id || fileConfig.id,
+    secret_key: cliArgs.key || cliArgs["secret-key"] || fileConfig.secret_key || fileConfig.secretKey,
+    cmd: cliArgs._.length > 0 ? cliArgs._ : (fileConfig.cmd || []),
+    maxReconnectAttempts: cliArgs.maxReconnect || cliArgs["max-reconnect"] || fileConfig.maxReconnectAttempts || 10,
+    reconnectDelay: cliArgs.reconnectDelay || cliArgs["reconnect-delay"] || fileConfig.reconnectDelay || 3000,
+    serverUrl: cliArgs.serverUrl || cliArgs["server-url"] || fileConfig.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket",
+    pingInterval: cliArgs.pingInterval || cliArgs["ping-interval"] || fileConfig.pingInterval || 30000,
+    maxMissedPongs: cliArgs.maxMissedPongs || cliArgs["max-missed-pongs"] || fileConfig.maxMissedPongs || 3,
+  };
+}
+
 // 命令行參數解析和使用示例
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const cmd = args._;
+  
+  // 讀取配置文件（默認為 config.json）
+  const configPath = args.config || args.c || "config.json";
+  const fileConfig = loadConfig(configPath);
+  
+  if (Object.keys(fileConfig).length > 0) {
+    console.log(`已從 ${configPath} 加載配置`);
+  }
+  
+  // 合併配置
+  const config = mergeConfig(fileConfig, args);
+  const cmd = config.cmd;
 
   // 創建 readline 接口用於標準輸入
   const rl = readline.createInterface({
@@ -274,8 +317,8 @@ async function main() {
 
   console.log("執行的命令:", finalCmd);
 
-  let id = args.id;
-  let secretKey = args.key;
+  let id = config.id;
+  let secretKey = config.secret_key;
 
   // 如果沒有提供 id，通過標準輸入詢問
   if (!id) {
@@ -303,10 +346,11 @@ async function main() {
     id: id,
     secret_key: secretKey,
     cmd: finalCmd,
-    maxReconnectAttempts: args.maxReconnect || 10,
-    reconnectDelay: args.reconnectDelay || 3000,
-    serverUrl:
-      args.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket",
+    maxReconnectAttempts: config.maxReconnectAttempts,
+    reconnectDelay: config.reconnectDelay,
+    serverUrl: config.serverUrl,
+    pingInterval: config.pingInterval,
+    maxMissedPongs: config.maxMissedPongs,
   });
 
   // 優雅關閉處理

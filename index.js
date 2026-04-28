@@ -8,7 +8,7 @@ class MCPWebSocketClient {
     this.id = options.id;
     this.secretKey = options.secret_key;
     this.cmd = options.cmd || [];
-
+    this.initialized = false;
     this.ws = null;
     this.mcpProcess = null;
     this.rl = null;
@@ -51,7 +51,9 @@ class MCPWebSocketClient {
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (this.missedPongs >= this.maxMissedPongs) {
-          console.log(`連續 ${this.maxMissedPongs} 次未收到pong，認為連接已斷開`);
+          console.log(
+            `連續 ${this.maxMissedPongs} 次未收到pong，認為連接已斷開`,
+          );
           this.ws.terminate();
           return;
         }
@@ -105,12 +107,36 @@ class MCPWebSocketClient {
       input: this.mcpProcess.stdout,
       crlfDelay: Infinity,
     });
-
     this.rl.on("line", (line) => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (!this.initialized) {
+        this.initialized = true;
+        return;
+      }
+      if (
+        this.initialized &&
+        this.ws &&
+        this.ws.readyState === WebSocket.OPEN
+      ) {
         this.ws.send(line);
       }
     });
+    // 等待子進程就緒後發送 initialize 請求
+    this.mcpProcess.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 0,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: {
+            name: "muppet-cli-tunnel",
+            version: "1.0.0",
+          },
+        },
+      }),
+    );
+    this.mcpProcess.stdin.write("\n");
   }
 
   handleMessage(data) {

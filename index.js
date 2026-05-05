@@ -265,14 +265,15 @@ function loadConfig(configPath) {
   }
 }
 
-// 合併配置：命令行參數優先於配置文件
-function mergeConfig(fileConfig, cliArgs) {
+// 合併配置：命令行參數 > 環境變量 > 配置文件 > 默認值
+function mergeConfig(fileConfig, cliArgs, envConfig) {
   return {
-    // 配置文件中的值
-    id: cliArgs.id || fileConfig.id,
+    // 優先級: 命令行參數 > 環境變量 > 配置文件 > 默認值
+    id: cliArgs.id || envConfig.id || fileConfig.id,
     secret_key:
       cliArgs.key ||
       cliArgs["secret-key"] ||
+      envConfig.secret_key ||
       fileConfig.secret_key ||
       fileConfig.secretKey,
     cmd: cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
@@ -289,6 +290,7 @@ function mergeConfig(fileConfig, cliArgs) {
     serverUrl:
       cliArgs.serverUrl ||
       cliArgs["server-url"] ||
+      envConfig.serverUrl ||
       fileConfig.serverUrl ||
       "wss://www.alterminal.com/mcps/tunnels/websocket",
     pingInterval:
@@ -304,20 +306,103 @@ function mergeConfig(fileConfig, cliArgs) {
   };
 }
 
+// 顯示幫助信息
+function showHelp() {
+  console.log(`
+Muppet CLI Tunnel - MCP WebSocket 隧道客戶端
+
+使用方法: node index.js [選項] [命令...]
+
+選項:
+  -c, --config <path>      指定配置文件路徑 (默認: config.json)
+  -i, --id <uuid>          隧道 ID (UUID)
+  -k, --secret-key <key>   Secret Key
+  --server-url <url>       WebSocket 服務器 URL
+  --max-reconnect <n>      最大重連次數 (默認: 10)
+  --reconnect-delay <ms>   重連延遲 (默認: 3000ms)
+  --ping-interval <ms>     Ping 間隔 (默認: 30000ms)
+  --max-missed-pongs <n>   最大丟失 Pong 次數 (默認: 3)
+  -h, --help              顯示此幫助信息
+  -v, --version           顯示版本號
+
+環境變量:
+  MUPPET_CONFIG           配置文件路徑
+  MUPPET_ID               隧道 ID
+  MUPPET_SECRET_KEY       Secret Key
+  MUPPET_SERVER_URL       WebSocket 服務器 URL
+
+示例:
+  node index.js -c ./my-config.json
+  node index.js -c /etc/muppet/config.json --id xxx --secret-key yyy node server.js
+  MUPPET_CONFIG=./prod.json node index.js
+`);
+}
+
+// 顯示版本信息
+function showVersion() {
+  const pkg = require('./package.json');
+  console.log(`v${pkg.version}`);
+}
+
+// 從環境變量加載配置
+function loadEnvConfig() {
+  return {
+    config: process.env.MUPPET_CONFIG,
+    id: process.env.MUPPET_ID,
+    secret_key: process.env.MUPPET_SECRET_KEY,
+    serverUrl: process.env.MUPPET_SERVER_URL,
+  };
+}
+
 // 命令行參數解析和使用示例
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2), {
+    alias: {
+      c: 'config',
+      i: 'id',
+      k: 'secret-key',
+      h: 'help',
+      v: 'version',
+    },
+    boolean: ['help', 'version'],
+    string: ['config', 'id', 'secret-key', 'server-url'],
+  });
 
-  // 讀取配置文件（默認為 config.json）
-  const configPath = args.config || args.c || "config.json";
-  const fileConfig = loadConfig(configPath);
+  // 顯示幫助信息
+  if (args.help) {
+    showHelp();
+    process.exit(0);
+  }
+
+  // 顯示版本信息
+  if (args.version) {
+    showVersion();
+    process.exit(0);
+  }
+
+  // 讀取環境變量配置
+  const envConfig = loadEnvConfig();
+
+  // 讀取配置文件（優先級: 命令行參數 > 環境變量 > 默認值）
+  const configPath = args.config || envConfig.config || "config.json";
+  
+  // 檢查配置文件是否存在
+  const fullConfigPath = path.resolve(configPath);
+  const fileConfig = loadConfig(fullConfigPath);
+  
+  if (configPath !== "config.json" && Object.keys(fileConfig).length === 0) {
+    console.error(`錯誤: 指定的配置文件不存在或無法讀取: ${configPath}`);
+    process.exit(1);
+  }
 
   if (Object.keys(fileConfig).length > 0) {
-    console.log(`已從 ${configPath} 加載配置`);
+    console.log(`✓ 已從 ${configPath} 加載配置`);
+  } else {
+    console.log(`⚠ 未找到配置文件 ${configPath}，將使用默認配置和命令行參數`);
   }
 
   // 合併配置
-  const config = mergeConfig(fileConfig, args);
+  const config = mergeConfig(fileConfig, args, envConfig);
   const cmd = config.cmd;
 
   // 創建 readline 接口用於標準輸入

@@ -88,7 +88,9 @@ class MCPWebSocketClient {
       return;
     }
 
-    this.mcpProcess = spawn(this.cmd[0], this.cmd.slice(1));
+    this.mcpProcess = spawn(this.cmd[0], this.cmd.slice(1), {
+      shell: true, // 添加这一行,这是关键
+    });
 
     // 處理子進程輸出
     this.mcpProcess.stdout.on("data", (data) => {
@@ -340,7 +342,7 @@ Muppet CLI Tunnel - MCP WebSocket 隧道客戶端
 
 // 顯示版本信息
 function showVersion() {
-  const pkg = require('./package.json');
+  const pkg = require("./package.json");
   console.log(`v${pkg.version}`);
 }
 
@@ -358,14 +360,14 @@ function loadEnvConfig() {
 async function main() {
   const args = parseArgs(process.argv.slice(2), {
     alias: {
-      c: 'config',
-      i: 'id',
-      k: 'secret-key',
-      h: 'help',
-      v: 'version',
+      c: "config",
+      i: "id",
+      k: "secret-key",
+      h: "help",
+      v: "version",
     },
-    boolean: ['help', 'version'],
-    string: ['config', 'id', 'secret-key', 'server-url'],
+    boolean: ["help", "version"],
+    string: ["config", "id", "secret-key", "server-url"],
   });
 
   // 顯示幫助信息
@@ -385,11 +387,11 @@ async function main() {
 
   // 讀取配置文件（優先級: 命令行參數 > 環境變量 > 默認值）
   const configPath = args.config || envConfig.config || "config.json";
-  
+
   // 檢查配置文件是否存在
   const fullConfigPath = path.resolve(configPath);
   const fileConfig = loadConfig(fullConfigPath);
-  
+
   if (configPath !== "config.json" && Object.keys(fileConfig).length === 0) {
     console.error(`錯誤: 指定的配置文件不存在或無法讀取: ${configPath}`);
     process.exit(1);

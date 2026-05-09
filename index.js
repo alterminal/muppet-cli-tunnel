@@ -5,6 +5,13 @@ const readline = require("readline");
 const fs = require("fs");
 const path = require("path");
 
+// 日誌工具函數，統一日誌格式
+const log = {
+  info: (msg) => console.log(`[INFO] ${new Date().toISOString()} ${msg}`),
+  error: (msg) => console.error(`[ERROR] ${new Date().toISOString()} ${msg}`),
+  warn: (msg) => console.warn(`[WARN] ${new Date().toISOString()} ${msg}`),
+};
+
 class MCPWebSocketClient {
   constructor(options = {}) {
     this.id = options.id;
@@ -15,14 +22,22 @@ class MCPWebSocketClient {
     this.mcpProcess = null;
     this.rl = null;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
-    this.reconnectDelay = options.reconnectDelay || 3000;
+    this.maxReconnectAttempts = Math.max(
+      1,
+      parseInt(options.maxReconnectAttempts) || 10,
+    );
+    this.reconnectDelay = Math.max(
+      100,
+      parseInt(options.reconnectDelay) || 3000,
+    );
     this.shouldReconnect = true;
     this.isManualClose = false;
-    this.pingInterval = options.pingInterval || 30000; // 預設30秒ping一次
+    this.pingInterval = Math.max(5000, parseInt(options.pingInterval) || 30000);
     this.pingTimer = null;
     this.missedPongs = 0;
-    this.maxMissedPongs = options.maxMissedPongs || 3; // 連續3次沒收到pong則斷開
+    this.maxMissedPongs = Math.max(1, parseInt(options.maxMissedPongs) || 3);
+    this.reconnectTimer = null;
+    this.boundHandlers = null;
 
     this.serverUrl =
       options.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket";
@@ -34,7 +49,7 @@ class MCPWebSocketClient {
 
   connect() {
     const url = this.getUrl();
-    console.log(`嘗試連接到: ${url}`);
+    log.info(`嘗試連接到: ${url}`);
 
     this.ws = new WebSocket(url);
 
@@ -46,16 +61,12 @@ class MCPWebSocketClient {
   }
 
   startPing() {
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-    }
+    this.stopPing();
     this.missedPongs = 0;
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (this.missedPongs >= this.maxMissedPongs) {
-          console.log(
-            `連續 ${this.maxMissedPongs} 次未收到pong，認為連接已斷開`,
-          );
+          log.warn(`連續 ${this.maxMissedPongs} 次未收到pong，認為連接已斷開`);
           this.ws.terminate();
           return;
         }
@@ -70,7 +81,6 @@ class MCPWebSocketClient {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
-    this.missedPongs = 0;
   }
 
   handlePong() {
@@ -78,31 +88,42 @@ class MCPWebSocketClient {
   }
 
   handleOpen() {
-    console.log("Muppet tunnel連接已建立");
-    this.reconnectAttempts = 0; // 重置重連計數
-    this.startPing(); // 啟動定期ping
+    log.info("Muppet tunnel連接已建立");
+    this.reconnectAttempts = 0;
+    this.startPing();
 
-    // 啟動子進程
-    if (this.cmd.length === 0) {
-      console.error("沒有指定要執行的命令");
+    if (!Array.isArray(this.cmd) || this.cmd.length === 0) {
+      log.error("沒有指定要執行的命令");
       return;
     }
 
-    this.mcpProcess = spawn(this.cmd[0], this.cmd.slice(1), {
-      shell: true, // 添加这一行,这是关键
-    });
+    // 啟動子進程
+    try {
+      this.mcpProcess = spawn(this.cmd[0], this.cmd.slice(1), {
+        shell: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (err) {
+      log.error(`啟動子進程失敗: ${err.message}`);
+      return;
+    }
 
-    // 處理子進程輸出
-    this.mcpProcess.stdout.on("data", (data) => {
-      // 可以選擇記錄或處理輸出
+    // 處理 spawn 失敗（例如命令不存在）
+    this.mcpProcess.on("error", (err) => {
+      log.error(`子進程錯誤: ${err.message}`);
+      this.mcpProcess = null;
     });
 
     this.mcpProcess.stderr.on("data", (data) => {
-      console.error(`stderr: ${data}`);
+      log.error(`子進程 stderr: ${data.toString().trim()}`);
     });
 
-    this.mcpProcess.on("close", (code) => {
-      console.log(`子進程退出，代碼：${code}`);
+    this.mcpProcess.once("close", (code) => {
+      log.info(`子進程退出，代碼：${code}`);
+      if (this.rl) {
+        this.rl.close();
+        this.rl = null;
+      }
       this.mcpProcess = null;
     });
 
@@ -111,61 +132,84 @@ class MCPWebSocketClient {
       input: this.mcpProcess.stdout,
       crlfDelay: Infinity,
     });
+
     this.rl.on("line", (line) => {
       if (!this.initialized) {
         this.initialized = true;
         return;
       }
-      if (
-        this.initialized &&
-        this.ws &&
-        this.ws.readyState === WebSocket.OPEN
-      ) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(line);
       }
     });
-    // 等待子進程就緒後發送 initialize 請求
-    this.mcpProcess.stdin.write(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: 0,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: {
-            name: "muppet-cli-tunnel",
-            version: "1.0.0",
-          },
+
+    // 發送 initialize 請求，並在寫入失敗時處理
+    const initMessage = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 0,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: {
+          name: "muppet-cli-tunnel",
+          version: "1.0.0",
         },
-      }),
-    );
-    this.mcpProcess.stdin.write("\n");
+      },
+    });
+
+    const writeResult = this.mcpProcess.stdin.write(initMessage + "\n");
+    if (!writeResult) {
+      log.warn("寫入初始化請求時緩衝區已滿，等待 drain 事件...");
+    }
   }
 
   handleMessage(data) {
-    if (this.mcpProcess && this.mcpProcess.stdin) {
-      this.mcpProcess.stdin.write(data);
-      this.mcpProcess.stdin.write("\n");
+    if (!this.mcpProcess || !this.mcpProcess.stdin) {
+      log.warn("收到消息但子進程已不存在，丟棄消息");
+      return;
+    }
+
+    if (this.mcpProcess.stdin.destroyed) {
+      log.warn("子進程 stdin 已銷毀，丟棄消息");
+      return;
+    }
+
+    try {
+      const messageStr = typeof data === "string" ? data : data.toString();
+      this.mcpProcess.stdin.write(messageStr + "\n");
+    } catch (err) {
+      log.error(`寫入子進程失敗: ${err.message}`);
     }
   }
 
   handleError(error) {
-    console.error("WebSocket錯誤:", error);
+    if (error.code === "ECONNREFUSED") {
+      log.error(`無法連接到服務器，連接被拒絕: ${error.message}`);
+    } else if (error.code === "ETIMEDOUT") {
+      log.error(`連接服務器超時: ${error.message}`);
+    } else {
+      log.error(`WebSocket錯誤: ${error.message}`);
+    }
   }
 
   handleClose(code, reason) {
-    if (code === "1002") {
-      console.log(`WebSocket連接已關閉: ${code} - ${reason}`);
+    const reasonStr = reason ? reason.toString() : "";
+
+    // 1002 是協議錯誤，通常是因為 id/secret_key 錯誤
+    if (code === 1002) {
+      log.error(`WebSocket協議錯誤 (${code}): ${reasonStr}`);
+      log.error("可能原因: ID 或 Secret Key 不正確");
+      this.isManualClose = true;
+      this.shouldReconnect = false;
+      this.cleanup();
       return;
     }
 
-    console.log(`WebSocket連接已關閉: ${code} - ${reason}`);
+    log.info(`WebSocket連接已關閉: ${code} - ${reasonStr}`);
 
-    // 清理資源
     this.cleanup();
 
-    // 如果不是手動關閉且需要重連，則嘗試重連
     if (!this.isManualClose && this.shouldReconnect) {
       this.scheduleReconnect();
     }
@@ -175,73 +219,105 @@ class MCPWebSocketClient {
     // 停止ping
     this.stopPing();
 
+    // 清除重連計時器
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     // 關閉readline接口
     if (this.rl) {
       this.rl.close();
       this.rl = null;
     }
 
-    // 終止子進程
+    // 終止子進程（確保資源釋放）
     if (this.mcpProcess) {
-      this.mcpProcess.kill();
+      try {
+        if (!this.mcpProcess.killed) {
+          this.mcpProcess.kill();
+        }
+      } catch (err) {
+        // 進程可能已經退出
+      }
       this.mcpProcess = null;
     }
 
-    // 關閉WebSocket
+    // 清理 WebSocket 並移除事件監聽器
     if (this.ws) {
-      this.ws.terminate();
+      try {
+        this.ws.removeAllListeners();
+        if (
+          this.ws.readyState === WebSocket.OPEN ||
+          this.ws.readyState === WebSocket.CONNECTING
+        ) {
+          this.ws.terminate();
+        }
+      } catch (err) {
+        // ws 可能已處於非正常狀態
+      }
       this.ws = null;
     }
   }
 
   scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.log(
-        `已達到最大重連次數 (${this.maxReconnectAttempts})，停止重連`,
-      );
+      log.info(`已達到最大重連次數 (${this.maxReconnectAttempts})，停止重連`);
       this.shouldReconnect = false;
       return;
     }
 
-    const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts); // 指數退避
+    // 指數退避，加上上限避免延遲過大
+    const delay = Math.min(
+      this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts),
+      60000,
+    );
     this.reconnectAttempts++;
 
-    console.log(
-      `將在 ${delay}ms 後進行第 ${this.reconnectAttempts} 次重連嘗試`,
+    log.info(
+      `將在 ${Math.round(delay)}ms 後進行第 ${this.reconnectAttempts} 次重連嘗試`,
     );
 
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
       if (!this.isManualClose && this.shouldReconnect) {
-        console.log(`嘗試第 ${this.reconnectAttempts} 次重連...`);
+        log.info(`嘗試第 ${this.reconnectAttempts} 次重連...`);
         this.connect();
       }
     }, delay);
   }
 
   disconnect() {
+    log.info("手動斷開連接");
     this.isManualClose = true;
     this.shouldReconnect = false;
     this.cleanup();
-    console.log("手動斷開連接");
   }
 
   reconnect() {
+    // 先清理現有連接，再建立新連接
+    this.isManualClose = false;
+    this.shouldReconnect = true;
+    this.reconnectAttempts = 0;
+
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      console.log("當前連接仍在使用中，先斷開再重連");
-      this.isManualClose = false; // 確保斷開後會重連
-      this.disconnect();
-      setTimeout(() => {
-        this.connect();
-      }, 1000);
-    } else {
-      this.connect();
+      log.info("當前連接仍在使用中，先斷開再重連");
+      this.isManualClose = true; // 先標記為手動關閉避免 cleanup 觸發 scheduleReconnect
+      this.cleanup();
+      this.isManualClose = false; // 恢復標記
     }
+
+    // 使用較短延遲確保舊連接完全清理
+    this.reconnectTimer = setTimeout(() => {
+      this.connect();
+    }, 500);
   }
 
   isConnected() {
     return this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 }
+
+// ======================== 工具函數 ========================
 
 // 通過標準輸入詢問用戶
 function askQuestion(rl, question) {
@@ -257,54 +333,72 @@ function loadConfig(configPath) {
   try {
     const fullPath = path.resolve(configPath);
     if (!fs.existsSync(fullPath)) {
-      return {};
+      return { _source: null };
     }
     const content = fs.readFileSync(fullPath, "utf-8");
-    return JSON.parse(content);
+    const config = JSON.parse(content);
+    return { ...config, _source: configPath };
   } catch (error) {
-    console.error(`讀取配置文件失敗: ${error.message}`);
-    return {};
+    if (error instanceof SyntaxError) {
+      log.error(`配置文件 JSON 格式錯誤: ${error.message}`);
+    } else {
+      log.error(`讀取配置文件失敗: ${error.message}`);
+    }
+    return { _source: null };
   }
 }
 
 // 合併配置：命令行參數 > 環境變量 > 配置文件 > 默認值
 function mergeConfig(fileConfig, cliArgs, envConfig) {
+  // 輔助函數：選取第一個有效值
+  const pick = (...values) => {
+    for (const v of values) {
+      if (v !== undefined && v !== null && v !== "") return v;
+    }
+    return undefined;
+  };
+
   return {
-    // 優先級: 命令行參數 > 環境變量 > 配置文件 > 默認值
-    id: cliArgs.id || envConfig.id || fileConfig.id,
-    secret_key:
-      cliArgs.key ||
-      cliArgs["secret-key"] ||
-      envConfig.secret_key ||
-      fileConfig.secret_key ||
+    id: pick(cliArgs.id, envConfig.id, fileConfig.id),
+    secret_key: pick(
+      cliArgs.key,
+      cliArgs["secret-key"],
+      envConfig.secret_key,
+      fileConfig.secret_key,
       fileConfig.secretKey,
-    cmd: cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
-    maxReconnectAttempts:
-      cliArgs.maxReconnect ||
-      cliArgs["max-reconnect"] ||
-      fileConfig.maxReconnectAttempts ||
+    ),
+    cmd: cliArgs._ && cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
+    maxReconnectAttempts: pick(
+      cliArgs.maxReconnect,
+      cliArgs["max-reconnect"],
+      fileConfig.maxReconnectAttempts,
       10,
-    reconnectDelay:
-      cliArgs.reconnectDelay ||
-      cliArgs["reconnect-delay"] ||
-      fileConfig.reconnectDelay ||
+    ),
+    reconnectDelay: pick(
+      cliArgs.reconnectDelay,
+      cliArgs["reconnect-delay"],
+      fileConfig.reconnectDelay,
       3000,
-    serverUrl:
-      cliArgs.serverUrl ||
-      cliArgs["server-url"] ||
-      envConfig.serverUrl ||
-      fileConfig.serverUrl ||
+    ),
+    serverUrl: pick(
+      cliArgs.serverUrl,
+      cliArgs["server-url"],
+      envConfig.serverUrl,
+      fileConfig.serverUrl,
       "wss://www.alterminal.com/mcps/tunnels/websocket",
-    pingInterval:
-      cliArgs.pingInterval ||
-      cliArgs["ping-interval"] ||
-      fileConfig.pingInterval ||
+    ),
+    pingInterval: pick(
+      cliArgs.pingInterval,
+      cliArgs["ping-interval"],
+      fileConfig.pingInterval,
       30000,
-    maxMissedPongs:
-      cliArgs.maxMissedPongs ||
-      cliArgs["max-missed-pongs"] ||
-      fileConfig.maxMissedPongs ||
+    ),
+    maxMissedPongs: pick(
+      cliArgs.maxMissedPongs,
+      cliArgs["max-missed-pongs"],
+      fileConfig.maxMissedPongs,
       3,
+    ),
   };
 }
 
@@ -342,8 +436,12 @@ Muppet CLI Tunnel - MCP WebSocket 隧道客戶端
 
 // 顯示版本信息
 function showVersion() {
-  const pkg = require("./package.json");
-  console.log(`v${pkg.version}`);
+  try {
+    const pkg = require("./package.json");
+    console.log(`v${pkg.version}`);
+  } catch {
+    console.log("v1.0.0");
+  }
 }
 
 // 從環境變量加載配置
@@ -356,7 +454,33 @@ function loadEnvConfig() {
   };
 }
 
-// 命令行參數解析和使用示例
+// 設置優雅關閉處理
+function setupGracefulShutdown(client) {
+  const handleSignal = (signal) => {
+    log.info(`收到 ${signal} 信號，正在關閉...`);
+    client.disconnect();
+    // 給 cleanup 一點時間完成
+    setTimeout(() => {
+      process.exit(0);
+    }, 200);
+  };
+
+  process.once("SIGINT", () => handleSignal("SIGINT"));
+  process.once("SIGTERM", () => handleSignal("SIGTERM"));
+
+  // 處理未捕獲的異常
+  process.on("uncaughtException", (err) => {
+    log.error(`未捕獲的異常: ${err.message}`);
+    log.error(err.stack);
+    client.disconnect();
+    setTimeout(() => {
+      process.exit(1);
+    }, 200);
+  });
+}
+
+// ======================== 主入口 ========================
+
 async function main() {
   const args = parseArgs(process.argv.slice(2), {
     alias: {
@@ -387,25 +511,22 @@ async function main() {
 
   // 讀取配置文件（優先級: 命令行參數 > 環境變量 > 默認值）
   const configPath = args.config || envConfig.config || "config.json";
+  const fileConfig = loadConfig(configPath);
 
-  // 檢查配置文件是否存在
-  const fullConfigPath = path.resolve(configPath);
-  const fileConfig = loadConfig(fullConfigPath);
-
-  if (configPath !== "config.json" && Object.keys(fileConfig).length === 0) {
-    console.error(`錯誤: 指定的配置文件不存在或無法讀取: ${configPath}`);
+  if (fileConfig._source === null && configPath !== "config.json") {
+    log.error(`錯誤: 指定的配置文件不存在或無法讀取: ${configPath}`);
     process.exit(1);
   }
 
-  if (Object.keys(fileConfig).length > 0) {
-    console.log(`✓ 已從 ${configPath} 加載配置`);
-  } else {
-    console.log(`⚠ 未找到配置文件 ${configPath}，將使用默認配置和命令行參數`);
+  if (fileConfig._source) {
+    log.info(`✓ 已從 ${configPath} 加載配置`);
+  } else if (configPath === "config.json") {
+    log.warn(`⚠ 未找到配置文件 ${configPath}，將使用默認配置和命令行參數`);
   }
 
   // 合併配置
   const config = mergeConfig(fileConfig, args, envConfig);
-  const cmd = config.cmd;
+  let finalCmd = config.cmd;
 
   // 創建 readline 接口用於標準輸入
   const rl = readline.createInterface({
@@ -414,19 +535,17 @@ async function main() {
   });
 
   // 如果沒有提供命令，詢問用戶輸入
-  let finalCmd = cmd;
-  if (finalCmd.length === 0) {
+  if (!Array.isArray(finalCmd) || finalCmd.length === 0) {
     const cmdInput = await askQuestion(rl, "請輸入要執行的命令: ");
     if (!cmdInput) {
-      console.error("錯誤: 命令不能為空");
+      log.error("錯誤: 命令不能為空");
       rl.close();
       process.exit(1);
     }
-    // 解析用戶輸入的命令（支援空格分隔的多個參數）
     finalCmd = cmdInput.trim().split(/\s+/);
   }
 
-  console.log("執行的命令:", finalCmd);
+  log.info(`執行的命令: ${finalCmd.join(" ")}`);
 
   let id = config.id;
   let secretKey = config.secret_key;
@@ -435,17 +554,17 @@ async function main() {
   if (!id) {
     id = await askQuestion(rl, "請輸入 Tunnel ID (UUID): ");
     if (!id) {
-      console.error("錯誤: ID 不能為空");
+      log.error("錯誤: ID 不能為空");
       rl.close();
       process.exit(1);
     }
   }
 
-  // 如果沒有提供 key，通過標準輸入詢問（輸入時隱藏密碼）
+  // 如果沒有提供 key，通過標準輸入詢問
   if (!secretKey) {
     secretKey = await askQuestion(rl, "請輸入 Secret Key: ");
     if (!secretKey) {
-      console.error("錯誤: Secret Key 不能為空");
+      log.error("錯誤: Secret Key 不能為空");
       rl.close();
       process.exit(1);
     }
@@ -454,7 +573,7 @@ async function main() {
   rl.close();
 
   const client = new MCPWebSocketClient({
-    id: id,
+    id,
     secret_key: secretKey,
     cmd: finalCmd,
     maxReconnectAttempts: config.maxReconnectAttempts,
@@ -465,21 +584,7 @@ async function main() {
   });
 
   // 優雅關閉處理
-  process.on("SIGINT", () => {
-    console.log("\n收到中斷信號，正在關閉...");
-    client.disconnect();
-    setTimeout(() => {
-      process.exit(0);
-    }, 100);
-  });
-
-  process.on("SIGTERM", () => {
-    console.log("\n收到終止信號，正在關閉...");
-    client.disconnect();
-    setTimeout(() => {
-      process.exit(0);
-    }, 100);
-  });
+  setupGracefulShutdown(client);
 
   // 開始連接
   client.connect();

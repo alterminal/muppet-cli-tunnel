@@ -48,6 +48,9 @@ class MCPWebSocketClient {
   }
 
   connect() {
+    // 重置狀態，確保乾淨的連接
+    this.initialized = false;
+
     const url = this.getUrl();
     log.info(`嘗試連接到: ${url}`);
 
@@ -233,15 +236,30 @@ class MCPWebSocketClient {
 
     // 終止子進程（確保資源釋放）
     if (this.mcpProcess) {
+      const proc = this.mcpProcess;
       try {
-        if (!this.mcpProcess.killed) {
-          this.mcpProcess.kill();
+        if (!proc.killed) {
+          proc.kill("SIGTERM");
+          // 設置強制終止計時器：若進程未響應 SIGTERM，則發送 SIGKILL
+          setTimeout(() => {
+            try {
+              if (!proc.killed) {
+                proc.kill("SIGKILL");
+                log.warn("子進程未響應 SIGTERM，已強制終止");
+              }
+            } catch (err) {
+              // 進程可能已經退出
+            }
+          }, 5000);
         }
       } catch (err) {
         // 進程可能已經退出
       }
       this.mcpProcess = null;
     }
+
+    // 重置初始化狀態，確保重連時重新進行 MCP 握手
+    this.initialized = false;
 
     // 清理 WebSocket 並移除事件監聽器
     if (this.ws) {
@@ -294,17 +312,15 @@ class MCPWebSocketClient {
   }
 
   reconnect() {
-    // 先清理現有連接，再建立新連接
+    // 先清理所有狀態，再建立新連接
     this.isManualClose = false;
     this.shouldReconnect = true;
     this.reconnectAttempts = 0;
 
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      log.info("當前連接仍在使用中，先斷開再重連");
-      this.isManualClose = true; // 先標記為手動關閉避免 cleanup 觸發 scheduleReconnect
-      this.cleanup();
-      this.isManualClose = false; // 恢復標記
-    }
+    log.info("重連前清理所有狀態...");
+    this.isManualClose = true; // 避免 cleanup 觸發 scheduleReconnect
+    this.cleanup();
+    this.isManualClose = false;
 
     // 使用較短延遲確保舊連接完全清理
     this.reconnectTimer = setTimeout(() => {

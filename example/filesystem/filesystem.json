@@ -1,0 +1,14 @@
+{
+  "id": "your-tunnel-uuid-here",
+  "secret_key": "your-secret-key-here",
+  "cmd": [
+    "npx",
+    "-y",
+    "@modelcontextprotocol/server-filesystem",
+    "/home/user/allowed-directory"
+  ],
+  "maxReconnectAttempts": 10,
+  "reconnectDelay": 3000,
+  "pingInterval": 30000,
+  "maxMissedPongs": 3
+}

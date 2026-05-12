@@ -1,0 +1,12 @@
+{
+  "id": "your-tunnel-uuid-here",
+  "secret_key": "your-secret-key-here",
+  "cmd": [
+    "uvx",
+    "cli-mcp-server"
+  ],
+  "maxReconnectAttempts": 10,
+  "reconnectDelay": 3000,
+  "pingInterval": 30000,
+  "maxMissedPongs": 3
+}

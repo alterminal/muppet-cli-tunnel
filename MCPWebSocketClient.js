@@ -1,5 +1,4 @@
-import { spawn } from "child_process";
-import readline from "readline";
+import McpClient from "./McpClient.js";
 import WebSocket from "ws";
 
 // 日誌工具函數，統一日誌格式
@@ -16,8 +15,6 @@ export default class MCPWebSocketClient {
     this.cmd = options.cmd || [];
     this.initialized = false;
     this.ws = null;
-    this.mcpProcess = null;
-    this.rl = null;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = Math.max(
       1,
@@ -38,6 +35,7 @@ export default class MCPWebSocketClient {
 
     this.serverUrl =
       options.serverUrl || "wss://www.alterminal.com/mcps/tunnels/websocket";
+    this.mcpClient = null;
   }
 
   getUrl() {
@@ -97,89 +95,45 @@ export default class MCPWebSocketClient {
       return;
     }
 
-    // 啟動子進程
+    // 啟動 MCP 客戶端
     try {
-      this.mcpProcess = spawn(this.cmd[0], this.cmd.slice(1), {
-        shell: true,
-        stdio: ["pipe", "pipe", "pipe"],
+      this.mcpClient = new McpClient(this.cmd);
+      this.mcpClient.on("initialized", () => {
+        log.info("MCP 子進程初始化完成");
       });
+      this.mcpClient.on("stdout", (line) => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(line);
+        }
+      });
+      this.mcpClient.on("close", (code) => {
+        log.info(`MCP 子進程關閉，代碼：${code}`);
+      });
+      this.mcpClient.on("error", (err) => {
+        log.error(`MCP 子進程錯誤: ${err.message}`);
+        this.mcpClient = null;
+      });
+      this.mcpClient.start();
     } catch (err) {
-      log.error(`啟動子進程失敗: ${err.message}`);
+      log.error(`啟動 MCP 客戶端失敗: ${err.message}`);
       return;
     }
 
-    // 處理 spawn 失敗（例如命令不存在）
-    this.mcpProcess.on("error", (err) => {
-      log.error(`子進程錯誤: ${err.message}`);
-      this.mcpProcess = null;
-    });
-
-    this.mcpProcess.stderr.on("data", (data) => {
-      log.error(`子進程 stderr: ${data.toString().trim()}`);
-    });
-
-    this.mcpProcess.once("close", (code) => {
-      log.info(`子進程退出，代碼：${code}`);
-      if (this.rl) {
-        this.rl.close();
-        this.rl = null;
-      }
-      this.mcpProcess = null;
-    });
-
-    // 創建readline接口來逐行讀取stdout
-    this.rl = readline.createInterface({
-      input: this.mcpProcess.stdout,
-      crlfDelay: Infinity,
-    });
-
-    this.rl.on("line", (line) => {
-      if (!this.initialized) {
-        this.initialized = true;
-        return;
-      }
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(line);
-      }
-    });
-
-    // 發送 initialize 請求，並在寫入失敗時處理
-    const initMessage = JSON.stringify({
-      jsonrpc: "2.0",
-      id: 0,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: {
-          name: "muppet-cli-tunnel",
-          version: "1.0.0",
-        },
-      },
-    });
-
-    const writeResult = this.mcpProcess.stdin.write(initMessage + "\n");
-    if (!writeResult) {
-      log.warn("寫入初始化請求時緩衝區已滿，等待 drain 事件...");
-    }
+    // 發送 initialize 請求
+    this.mcpClient.sendInitialize();
   }
 
   handleMessage(data) {
-    if (!this.mcpProcess || !this.mcpProcess.stdin) {
-      log.warn("收到消息但子進程已不存在，丟棄消息");
-      return;
-    }
-
-    if (this.mcpProcess.stdin.destroyed) {
-      log.warn("子進程 stdin 已銷毀，丟棄消息");
+    if (!this.mcpClient || !this.mcpClient.isRunning()) {
+      log.warn("收到消息但 MCP 客戶端已不存在或未運行，丟棄消息");
       return;
     }
 
     try {
       const messageStr = typeof data === "string" ? data : data.toString();
-      this.mcpProcess.stdin.write(messageStr + "\n");
+      this.mcpClient.write(messageStr);
     } catch (err) {
-      log.error(`寫入子進程失敗: ${err.message}`);
+      log.error(`通過 MCP 客戶端寫入失敗: ${err.message}`);
     }
   }
 
@@ -225,34 +179,10 @@ export default class MCPWebSocketClient {
       this.reconnectTimer = null;
     }
 
-    // 關閉readline接口
-    if (this.rl) {
-      this.rl.close();
-      this.rl = null;
-    }
-
-    // 終止子進程（確保資源釋放）
-    if (this.mcpProcess) {
-      const proc = this.mcpProcess;
-      try {
-        if (!proc.killed) {
-          proc.kill("SIGTERM");
-          // 設置強制終止計時器：若進程未響應 SIGTERM，則發送 SIGKILL
-          setTimeout(() => {
-            try {
-              if (!proc.killed) {
-                proc.kill("SIGKILL");
-                log.warn("子進程未響應 SIGTERM，已強制終止");
-              }
-            } catch (err) {
-              // 進程可能已經退出
-            }
-          }, 5000);
-        }
-      } catch (err) {
-        // 進程可能已經退出
-      }
-      this.mcpProcess = null;
+    // 停止 MCP 客戶端
+    if (this.mcpClient) {
+      this.mcpClient.stop();
+      this.mcpClient = null;
     }
 
     // 重置初始化狀態，確保重連時重新進行 MCP 握手

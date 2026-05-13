@@ -23,12 +23,16 @@ export default class McpClient {
     this.initialized = false;
     this.mcpProcess = null;
     this.rl = null;
+    this.tools = [];
+    this._pendingRequests = new Map();
+    this._requestId = 0;
     this._callbacks = {
       onstdout: null,
       onmessage: null,
       onerror: null,
       onclose: null,
       oninitialized: null,
+      ontoolsloaded: null,
     };
   }
 
@@ -86,14 +90,49 @@ export default class McpClient {
     });
 
     this.rl.on("line", (line) => {
-      // 第一行用於跳過 initialize 響應
-      if (!this.initialized) {
+      // 解析 JSON-RPC 消息
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        // 如果不是有效的 JSON，跳過
+        return;
+      }
+
+      // 檢查是否是初始化響應
+      if (!this.initialized && parsed.id === 0) {
         this.initialized = true;
         if (this._callbacks.oninitialized) {
           this._callbacks.oninitialized();
         }
+        // 初始化完成後，自動獲取 tools 列表
+        this.listTools();
         return;
       }
+
+      // 處理 tools/list 響應
+      if (parsed.id !== undefined && this._pendingRequests.has(parsed.id)) {
+        const pending = this._pendingRequests.get(parsed.id);
+        this._pendingRequests.delete(parsed.id);
+
+        if (parsed.result && parsed.result.tools) {
+          this.tools = parsed.result.tools;
+          log.info(`已緩存 ${this.tools.length} 個工具`);
+          if (pending.resolve) {
+            pending.resolve(parsed.result.tools);
+          }
+          if (this._callbacks.ontoolsloaded) {
+            this._callbacks.ontoolsloaded(this.tools);
+          }
+        } else if (parsed.error) {
+          log.error(`list_tools 請求失敗: ${JSON.stringify(parsed.error)}`);
+          if (pending.reject) {
+            pending.reject(parsed.error);
+          }
+        }
+        return;
+      }
+
       // 通知上層有 stdout 數據
       if (this._callbacks.onstdout) {
         this._callbacks.onstdout(line);
@@ -211,6 +250,37 @@ export default class McpClient {
       },
     });
     return this.write(initMessage);
+  }
+
+  /**
+   * 發送 tools/list 請求並緩存結果
+   * @returns {Promise<Array>} 工具列表
+   */
+  listTools() {
+    return new Promise((resolve, reject) => {
+      const id = ++this._requestId;
+      this._pendingRequests.set(id, { resolve, reject });
+
+      const message = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/list",
+        params: {},
+      });
+
+      if (!this.write(message)) {
+        this._pendingRequests.delete(id);
+        reject(new Error("Failed to write message"));
+      }
+    });
+  }
+
+  /**
+   * 註冊工具列表加載完成回調
+   * @param {Function} callback - 回調函數，接收 tools 數組作為參數
+   */
+  onToolsLoaded(callback) {
+    this._callbacks.ontoolsloaded = callback;
   }
 
   /**

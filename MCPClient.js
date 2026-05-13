@@ -133,6 +133,24 @@ export default class MCPClient {
         return;
       }
 
+      // 處理 tools/call 響應
+      if (parsed.id !== undefined && this._pendingRequests.has(parsed.id)) {
+        const pending = this._pendingRequests.get(parsed.id);
+        this._pendingRequests.delete(parsed.id);
+
+        if (parsed.error) {
+          log.error(`call_tool 請求失敗: ${JSON.stringify(parsed.error)}`);
+          if (pending.reject) {
+            pending.reject(parsed.error);
+          }
+        } else if (parsed.result) {
+          if (pending.resolve) {
+            pending.resolve(parsed.result);
+          }
+        }
+        return;
+      }
+
       // 通知上層有 stdout 數據
       if (this._callbacks.onstdout) {
         this._callbacks.onstdout(line);
@@ -266,6 +284,34 @@ export default class MCPClient {
         id,
         method: "tools/list",
         params: {},
+      });
+
+      if (!this.write(message)) {
+        this._pendingRequests.delete(id);
+        reject(new Error("Failed to write message"));
+      }
+    });
+  }
+
+  /**
+   * 調用指定的工具
+   * @param {string} name - 工具名稱
+   * @param {object} arguments - 工具參數
+   * @returns {Promise<object>} 工具執行結果
+   */
+  callTool(name, arguments = {}) {
+    return new Promise((resolve, reject) => {
+      const id = ++this._requestId;
+      this._pendingRequests.set(id, { resolve, reject });
+
+      const message = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name,
+          arguments,
+        },
       });
 
       if (!this.write(message)) {

@@ -9,12 +9,12 @@ const log = {
 };
 
 /**
- * McpClient - MCP 子進程客戶端
+ * MCPClient - MCP 子進程客戶端
  *
  * 只負責啟動子進程和通過 stdio 與子進程通訊，
  * 不涉及 WebSocket 連接等邏輯。
  */
-export default class McpClient {
+export default class MCPClient {
   /**
    * @param {string|string[]} cmd - 要執行的命令
    */

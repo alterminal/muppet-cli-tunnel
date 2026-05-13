@@ -1,5 +1,5 @@
-import McpClient from "./McpClient.js";
 import WebSocket from "ws";
+import MCPClient from "./MCPClient.js";
 
 // 日誌工具函數，統一日誌格式
 const log = {
@@ -97,7 +97,7 @@ export default class MCPWebSocketClient {
 
     // 啟動 MCP 客戶端
     try {
-      this.mcpClient = new McpClient(this.cmd);
+      this.mcpClient = new MCPClient(this.cmd);
       this.mcpClient.on("initialized", () => {
         log.info("MCP 子進程初始化完成");
       });

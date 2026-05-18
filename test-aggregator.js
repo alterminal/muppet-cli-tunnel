@@ -38,6 +38,9 @@ aggregator.on("allclientsready", (clients) => {
       log.info(`    描述: ${tool.description}`);
     }
   }
+
+  // 測試 callTool 功能
+  testCallTool(aggregator, allTools);
 });
 
 aggregator.on("toolregistered", (clientName, tool) => {
@@ -47,6 +50,26 @@ aggregator.on("toolregistered", (clientName, tool) => {
 aggregator.on("error", (clientName, err) => {
   log.error(`客戶端 "${clientName}" 錯誤: ${err.message}`);
 });
+
+// 測試工具調用
+async function testCallTool(aggregator, allTools) {
+  if (allTools.length === 0) {
+    log.warn("沒有可測試的工具");
+    return;
+  }
+
+  // 測試第一個工具
+  const firstTool = allTools[0];
+  log.info(`\n測試調用工具: ${firstTool.name}`);
+  
+  try {
+    const result = await aggregator.callTool(firstTool.name, {});
+    log.info(`工具調用成功！結果:`);
+    console.log(JSON.stringify(result, null, 2));
+  } catch (err) {
+    log.error(`工具調用失敗: ${err.message}`);
+  }
+}
 
 // 初始化並啟動所有客戶端
 log.info("開始初始化...");

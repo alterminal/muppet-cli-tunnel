@@ -17,9 +17,14 @@ const log = {
 export default class MCPClient {
   /**
    * @param {string|string[]} cmd - 要執行的命令
+   * @param {string} idPrefix - 用於區分不同客戶端的 ID 前綴
+   * @param {Object} options - 配置選項
+   * @param {boolean} options.autoListTools - 是否自動獲取工具列表（默認: true）
    */
-  constructor(cmd) {
+  constructor(cmd, idPrefix = "", options = {}) {
     this.cmd = Array.isArray(cmd) ? cmd : [cmd];
+    this.idPrefix = idPrefix;
+    this.autoListTools = options.autoListTools !== false;
     this.initialized = false;
     this.mcpProcess = null;
     this.rl = null;
@@ -99,14 +104,16 @@ export default class MCPClient {
         return;
       }
 
-      // 檢查是否是初始化響應
-      if (!this.initialized && parsed.id === 0) {
+      // 檢查是否是初始化響應（id 為 0 或小於等於初始請求 ID 的值）
+      if (!this.initialized && parsed.result && parsed.id !== undefined) {
         this.initialized = true;
         if (this._callbacks.oninitialized) {
           this._callbacks.oninitialized();
         }
-        // 初始化完成後，自動獲取 tools 列表
-        this.listTools();
+        // 如果啟用自動獲取工具列表
+        if (this.autoListTools) {
+          this.listTools();
+        }
         return;
       }
 
@@ -250,13 +257,22 @@ export default class MCPClient {
   }
 
   /**
+   * 獲取下一個請求 ID
+   * @returns {number}
+   */
+  _getNextRequestId() {
+    return ++this._requestId;
+  }
+
+  /**
    * 發送初始化請求
-   * 會自動注入 \\n 作為行尾分隔符
+   * 會自動注入 \n 作為行尾分隔符
    */
   sendInitialize() {
+    const id = this._getNextRequestId();
     const initMessage = JSON.stringify({
       jsonrpc: "2.0",
-      id: 0,
+      id,
       method: "initialize",
       params: {
         protocolVersion: "2024-11-05",
@@ -274,9 +290,9 @@ export default class MCPClient {
    * 發送 tools/list 請求並緩存結果
    * @returns {Promise<Array>} 工具列表
    */
-  listTools() {
+  listTools(requestId = null) {
+    const id = requestId !== null ? requestId : this._getNextRequestId();
     return new Promise((resolve, reject) => {
-      const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
 
       const message = JSON.stringify({

@@ -8,102 +8,324 @@ const log = {
 };
 
 /**
- * MCPAggregator - MCP 客戶端聚合器
+ * MCPServerAggregator - MCP 服務器聚合器
  *
- * 管理多個 MCPClient 實例，聚合它們的工具列表，
- * 並提供統一的事件接口。
+ * 根據配置啟動多個 MCPClient，在接收到 call tool 時根據 tool name
+ * 尋找對應的 MCPClient 並將請求轉發給該 MCPClient。
  */
-export default class McpServerAggregator {
+export default class MCPServerAggregator {
   /**
    * @param {Object} options - 配置選項
-   * @param {Array} options.servers - 服務器配置列表，每項包含 name 和 cmd
-   * @param {Object} options.aggregatorOptions - 聚合器級別的選項（如 WebSocket 連接等）
+   * @param {Array<Object>} options.servers - 服務器配置數組
+   * @param {string} options.servers[].name - 服務器名稱（唯一標識）
+   * @param {string|string[]} options.servers[].cmd - 要執行的命令
    */
   constructor(options = {}) {
     this.servers = options.servers || [];
-    this.aggregatorOptions = options.aggregatorOptions || {};
-    
-    // 客戶端 Map: name -> { client, tools }
-    this.clients = new Map();
-    
-    // 工具列表: 所有客戶端的工具合併
-    this.allTools = [];
-    
-    // 初始化狀態
-    this._initialized = false;
-    this._initializing = false;
-    
-    // 事件監聽器
-    this._eventListeners = {
-      clientinitialized: [],
-      allclientsready: [],
-      toolregistered: [],
-      error: [],
-      clientclosed: [],
+    this.clients = new Map(); // name -> MCPClient
+    this.clientTools = new Map(); // clientName -> Set<toolName>
+    this.allTools = []; // 所有工具的扁平列表
+    this._initializedClients = new Set();
+    this._initializedCount = 0;
+    this._readyPromise = null;
+    this._readyResolve = null;
+    this._readyReject = null;
+    this._clientRequestIdCounters = new Map(); // clientName -> nextRequestId
+
+    // 事件回調
+    this._callbacks = {
+      onclientinitialized: null,
+      onallclientsready: null,
+      ontoolregistered: null,
+      onerror: null,
     };
-    
-    // 待處理的初始化 Promise
-    this._initPromise = null;
+
+    // 每個 client 的 pending 請求（用於處理 call tool 響應）
+    this._pendingRequests = new Map(); // requestId -> { resolve, reject, clientName }
+    this._requestId = 0;
+
+    // 初始化客戶端
+    this._initClients();
   }
 
   /**
-   * 註冊事件監聽器
-   * @param {'clientinitialized'|'allclientsready'|'toolregistered'|'error'|'clientclosed'} event
-   * @param {Function} callback
+   * 初始化所有客戶端
+   * @returns {Promise<void>}
    */
-  on(event, callback) {
-    if (this._eventListeners[event]) {
-      this._eventListeners[event].push(callback);
-    } else {
-      log.warn(`未知的事件類型: ${event}`);
+  async initialize() {
+    if (this._readyPromise) {
+      return this._readyPromise;
     }
+
+    this._readyPromise = new Promise((resolve, reject) => {
+      this._readyResolve = resolve;
+      this._readyReject = reject;
+    });
+
+    const clientNames = Array.from(this.clients.keys());
+    if (clientNames.length === 0) {
+      log.warn("沒有配置任何服務器");
+      this._readyResolve([]);
+      return this._readyPromise;
+    }
+
+    log.info(`開始初始化 ${clientNames.length} 個客戶端...`);
+
+    for (const name of clientNames) {
+      // 初始化該客戶端的請求 ID 計數器
+      this._clientRequestIdCounters.set(name, 1000);
+
+      const client = this.clients.get(name);
+      try {
+        this._setupClientEvents(name, client);
+        client.start();
+        client.sendInitialize();
+      } catch (err) {
+        log.error(`啟動客戶端 "${name}" 失敗: ${err.message}`);
+        this._emit("error", name, err);
+      }
+    }
+
+    return this._readyPromise;
   }
 
   /**
-   * 移除事件監聽器
-   * @param {'clientinitialized'|'allclientsready'|'toolregistered'|'error'|'clientclosed'} event
-   * @param {Function} callback
+   * 設置客戶端事件監聽
+   * @param {string} name - 客戶端名稱
+   * @param {MCPClient} client - MCPClient 實例
    */
-  off(event, callback) {
-    if (this._eventListeners[event]) {
-      const index = this._eventListeners[event].indexOf(callback);
-      if (index > -1) {
-        this._eventListeners[event].splice(index, 1);
+  _setupClientEvents(name, client) {
+    client.on("initialized", () => {
+      log.info(`客戶端 "${name}" MCP 初始化完成`);
+    });
+
+    client.on("stdout", (line) => {
+      // 解析 JSON-RPC 消息
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        // 非 JSON 消息，忽略
+        return;
+      }
+
+      // 忽略通知消息
+      if (parsed.id === undefined && parsed.method) {
+        return;
+      }
+
+      // 檢查是否是初始化響應
+      if (!this._initializedClients.has(name) && parsed.result) {
+        // 初始化成功，標記並獲取工具列表
+        // 使用客戶端專用的請求 ID
+        const requestId = this._getNextClientRequestId(name);
+        client.listTools(requestId);
+        return;
+      }
+
+      // 處理 tools/list 響應
+      if (parsed.result && parsed.result.tools && !parsed.error) {
+        // 檢查是否已初始化過
+        if (this._initializedClients.has(name)) {
+          return; // 避免重複處理
+        }
+        this._handleToolsList(name, parsed.result.tools);
+        return;
+      }
+
+      // 處理 tools/call 響應
+      if (parsed.id !== undefined && this._pendingRequests.has(parsed.id)) {
+        const pending = this._pendingRequests.get(parsed.id);
+        this._pendingRequests.delete(parsed.id);
+
+        if (parsed.error) {
+          if (pending.reject) {
+            pending.reject(parsed.error);
+          }
+        } else if (parsed.result) {
+          if (pending.resolve) {
+            pending.resolve(parsed.result);
+          }
+        }
+        return;
+      }
+    });
+
+    client.on("close", (code) => {
+      log.info(`客戶端 "${name}" 連接關閉，代碼: ${code}`);
+      this._initializedClients.delete(name);
+    });
+
+    client.on("error", (err) => {
+      log.error(`客戶端 "${name}" 錯誤: ${err.message}`);
+      this._emit("error", name, err);
+    });
+  }
+
+  /**
+   * 獲取客戶端的下一個請求 ID
+   * @param {string} clientName - 客戶端名稱
+   * @returns {number}
+   */
+  _getNextClientRequestId(clientName) {
+    const counter = this._clientRequestIdCounters.get(clientName) || 1000;
+    this._clientRequestIdCounters.set(clientName, counter + 1);
+    return counter;
+  }
+
+  /**
+   * 處理工具列表
+   * @param {string} clientName - 客戶端名稱
+   * @param {Array} tools - 工具數組
+   */
+  _handleToolsList(clientName, tools) {
+    if (this._initializedClients.has(clientName)) {
+      // 已初始化過，更新工具列表
+      this.clientTools.get(clientName)?.clear();
+    }
+
+    this._initializedClients.add(clientName);
+    this._initializedCount++;
+
+    // 存儲工具
+    const toolSet = new Set();
+    for (const tool of tools) {
+      const toolInfo = {
+        name: tool.name,
+        description: tool.description || "",
+        inputSchema: tool.inputSchema || {},
+        clientName: clientName,
+      };
+      this.allTools.push(toolInfo);
+      toolSet.add(tool.name);
+
+      this._emit("toolregistered", clientName, toolInfo);
+    }
+    this.clientTools.set(clientName, toolSet);
+
+    log.info(`客戶端 "${clientName}" 加載了 ${tools.length} 個工具`);
+
+    // 觸發客戶端初始化完成事件
+    this._emit("clientinitialized", clientName, client, tools);
+
+    // 檢查是否所有客戶端都已初始化
+    if (this._initializedCount === this.clients.size) {
+      log.info("所有客戶端初始化完成");
+      this._emit("allclientsready", Array.from(this.clients.keys()));
+
+      if (this._readyResolve) {
+        this._readyResolve(Array.from(this.clients.values()));
       }
     }
   }
 
   /**
-   * 觸發事件
-   * @param {string} event
-   * @param {...any} args
+   * 初始化客戶端
+   * @private
    */
-  _emit(event, ...args) {
-    if (this._eventListeners[event]) {
-      for (const listener of this._eventListeners[event]) {
-        try {
-          listener(...args);
-        } catch (err) {
-          log.error(`事件監聽器執行失敗: ${err.message}`);
+  _initClients() {
+    for (const server of this.servers) {
+      const name = server.name;
+      if (!name) {
+        log.warn("服務器配置缺少 name 字段，跳過");
+        continue;
+      }
+
+      if (this.clients.has(name)) {
+        log.warn(`客戶端 "${name}" 已存在，將被覆蓋`);
+      }
+
+      const client = new MCPClient(server.cmd, name + "_", {
+        autoListTools: false,
+      });
+      this.clients.set(name, client);
+
+      // 初始化工具集合
+      this.clientTools.set(name, new Set());
+
+      log.info(`已創建客戶端 "${name}"`);
+    }
+  }
+
+  /**
+   * 查找工具所屬的客戶端
+   * @param {string} toolName - 工具名稱
+   * @returns {{ clientName: string, client: MCPClient } | null}
+   */
+  _findClientByTool(toolName) {
+    for (const [clientName, tools] of this.clientTools) {
+      if (tools.has(toolName)) {
+        const client = this.clients.get(clientName);
+        if (client && client.isRunning()) {
+          return { clientName, client };
         }
       }
     }
+    return null;
   }
 
   /**
-   * 獲取所有已註冊的工具
-   * @returns {Array} 工具列表
+   * 調用工具
+   * @param {string} toolName - 工具名稱
+   * @param {Object} args - 工具參數
+   * @returns {Promise<Object>} 工具執行結果
+   */
+  async callTool(toolName, args = {}) {
+    const target = this._findClientByTool(toolName);
+
+    if (!target) {
+      throw new Error(`工具 "${toolName}" 未找到或其所屬客戶端未運行`);
+    }
+
+    const { clientName, client } = target;
+
+    return new Promise((resolve, reject) => {
+      const id = ++this._requestId;
+      this._pendingRequests.set(id, { resolve, reject, clientName });
+
+      const message = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: toolName,
+          arguments: args,
+        },
+      });
+
+      if (!client.write(message)) {
+        this._pendingRequests.delete(id);
+        reject(new Error(`寫入客戶端 "${clientName}" 失敗`));
+      }
+    });
+  }
+
+  /**
+   * 獲取所有工具列表
+   * @returns {Array<Object>} 工具數組
    */
   getAllTools() {
-    return this.allTools;
+    return [...this.allTools];
   }
 
   /**
    * 獲取所有客戶端名稱
-   * @returns {string[]} 客戶端名稱列表
+   * @returns {Array<string>}
    */
   getClientNames() {
     return Array.from(this.clients.keys());
+  }
+
+  /**
+   * 獲取客戶端的工具列表
+   * @param {string} clientName - 客戶端名稱
+   * @returns {Array<Object>}
+   */
+  getClientTools(clientName) {
+    const toolSet = this.clientTools.get(clientName);
+    if (!toolSet) return [];
+
+    return this.allTools.filter((t) => t.clientName === clientName);
   }
 
   /**
@@ -111,254 +333,139 @@ export default class McpServerAggregator {
    * @returns {boolean}
    */
   isInitialized() {
-    return this._initialized;
-  }
-
-  /**
-   * 獲取特定客戶端的工具列表
-   * @param {string} clientName
-   * @returns {Array|null}
-   */
-  getClientTools(clientName) {
-    const clientInfo = this.clients.get(clientName);
-    return clientInfo ? clientInfo.tools : null;
+    return this._initializedCount === this.clients.size;
   }
 
   /**
    * 獲取客戶端實例
-   * @param {string} clientName
-   * @returns {MCPClient|null}
+   * @param {string} name - 客戶端名稱
+   * @returns {MCPClient | null}
    */
-  getClient(clientName) {
-    const clientInfo = this.clients.get(clientName);
-    return clientInfo ? clientInfo.client : null;
+  getClient(name) {
+    return this.clients.get(name) || null;
   }
 
   /**
-   * 根據工具名稱查找對應的客戶端
-   * @param {string} toolName
-   * @returns {{ clientName: string, client: MCPClient }|null}
+   * 註冊事件監聽
+   * @param {'clientinitialized'|'allclientsready'|'toolregistered'|'error'} event - 事件名稱
+   * @param {Function} callback - 回調函數
    */
-  findToolClient(toolName) {
-    for (const [clientName, clientInfo] of this.clients) {
-      const tool = clientInfo.tools.find(t => t.name === toolName);
-      if (tool) {
-        return { clientName, client: clientInfo.client };
+  on(event, callback) {
+    const eventMap = {
+      clientinitialized: "onclientinitialized",
+      allclientsready: "onallclientsready",
+      toolregistered: "ontoolregistered",
+      error: "onerror",
+    };
+
+    const callbackName = eventMap[event];
+    if (callbackName) {
+      this._callbacks[callbackName] = callback;
+    }
+  }
+
+  /**
+   * 移除事件監聽
+   * @param {'clientinitialized'|'allclientsready'|'toolregistered'|'error'} event - 事件名稱
+   */
+  off(event) {
+    const eventMap = {
+      clientinitialized: "onclientinitialized",
+      allclientsready: "onallclientsready",
+      toolregistered: "ontoolregistered",
+      error: "onerror",
+    };
+
+    const callbackName = eventMap[event];
+    if (callbackName) {
+      this._callbacks[callbackName] = null;
+    }
+  }
+
+  /**
+   * 觸發事件
+   * @param {string} event - 事件名稱
+   * @param {...*} args - 事件參數
+   */
+  _emit(event, ...args) {
+    const eventMap = {
+      clientinitialized: "onclientinitialized",
+      allclientsready: "onallclientsready",
+      toolregistered: "ontoolregistered",
+      error: "onerror",
+    };
+
+    const callbackName = eventMap[event];
+    if (callbackName && this._callbacks[callbackName]) {
+      try {
+        this._callbacks[callbackName](...args);
+      } catch (err) {
+        log.error(`事件監聽器執行失敗: ${err.message}`);
       }
     }
-    return null;
   }
 
   /**
-   * 初始化並啟動所有 MCP 客戶端
-   * @returns {Promise<void>}
-   */
-  async initialize() {
-    if (this._initialized) {
-      log.warn("聚合器已經初始化");
-      return;
-    }
-
-    if (this._initializing) {
-      return this._initPromise;
-    }
-
-    this._initializing = true;
-    this._initPromise = this._doInitialize();
-    
-    try {
-      await this._initPromise;
-      this._initialized = true;
-    } finally {
-      this._initializing = false;
-      this._initPromise = null;
-    }
-  }
-
-  /**
-   * 執行實際的初始化邏輯
-   * @returns {Promise<void>}
-   */
-  async _doInitialize() {
-    log.info(`開始初始化 ${this.servers.length} 個 MCP 客戶端...`);
-
-    // 創建並啟動所有客戶端
-    const initPromises = this.servers.map((serverConfig) =>
-      this._startClient(serverConfig)
-    );
-
-    // 等待所有客戶端初始化完成
-    await Promise.all(initPromises);
-
-    log.info("所有 MCP 客戶端初始化完成");
-    this._emit("allclientsready", this.getClientNames());
-  }
-
-  /**
-   * 啟動單個 MCP 客戶端
-   * @param {Object} serverConfig - 服務器配置
-   * @param {string} serverConfig.name - 客戶端名稱
-   * @param {string|string[]} serverConfig.cmd - 執行命令
-   * @returns {Promise<void>}
-   */
-  async _startClient(serverConfig) {
-    const { name, cmd } = serverConfig;
-    
-    if (!name || !cmd) {
-      log.error(`客戶端配置不完整，跳過: ${JSON.stringify(serverConfig)}`);
-      return;
-    }
-
-    log.info(`啟動客戶端 "${name}": ${Array.isArray(cmd) ? cmd.join(" ") : cmd}`);
-
-    return new Promise((resolve) => {
-      const client = new MCPClient(cmd);
-      
-      // 設置事件監聽
-      client.on("initialized", () => {
-        log.info(`客戶端 "${name}" MCP 初始化完成`);
-      });
-
-      client.on("error", (err) => {
-        log.error(`客戶端 "${name}" 錯誤: ${err.message}`);
-        this._emit("error", name, err);
-      });
-
-      client.on("close", (code) => {
-        log.info(`客戶端 "${name}" 連接關閉，代碼: ${code}`);
-        this._emit("clientclosed", name, code);
-      });
-
-      // 監聽工具列表加載完成
-      client.onToolsLoaded((tools) => {
-        log.info(`客戶端 "${name}" 工具加載完成，共 ${tools.length} 個工具`);
-        
-        // 為每個工具標記來源客戶端名稱
-        const taggedTools = tools.map(tool => ({
-          ...tool,
-          clientName: name,
-        }));
-        
-        // 添加到工具列表
-        for (const tool of taggedTools) {
-          this.allTools.push(tool);
-          this._emit("toolregistered", name, tool);
-        }
-
-        // 更新客戶端信息
-        const clientInfo = this.clients.get(name);
-        if (clientInfo) {
-          clientInfo.tools = taggedTools;
-        }
-
-        // 觸發客戶端初始化完成事件
-        this._emit("clientinitialized", name, client, taggedTools);
-        
-        resolve();
-      });
-
-      // 保存客戶端實例
-      this.clients.set(name, {
-        client,
-        tools: [],
-      });
-
-      // 啟動客戶端
-      client.start();
-      
-      // 發送初始化請求
-      client.sendInitialize();
-
-      // 設置超時：如果一段時間後仍未收到工具列表，也標記為完成
-      setTimeout(() => {
-        const clientInfo = this.clients.get(name);
-        if (clientInfo && clientInfo.tools.length === 0) {
-          log.warn(`客戶端 "${name}" 工具列表超時，視為已完成`);
-          this._emit("clientinitialized", name, client, []);
-          resolve();
-        }
-      }, 30000);
-    });
-  }
-
-  /**
-   * 停止所有 MCP 客戶端
+   * 停止所有客戶端
    */
   stopAll() {
-    log.info("停止所有 MCP 客戶端...");
-    
-    for (const [name, clientInfo] of this.clients) {
+    log.info("正在停止所有客戶端...");
+
+    for (const [name, client] of this.clients) {
       try {
-        clientInfo.client.stop();
+        client.stop();
         log.info(`已停止客戶端 "${name}"`);
       } catch (err) {
         log.error(`停止客戶端 "${name}" 失敗: ${err.message}`);
       }
     }
 
-    // 清空客戶端列表
-    this.clients.clear();
-    this.allTools = [];
-    this._initialized = false;
+    // 清理狀態
+    this._initializedClients.clear();
+    this._initializedCount = 0;
+    this._readyPromise = null;
+    this._readyResolve = null;
+    this._readyReject = null;
+    this._pendingRequests.clear();
   }
 
   /**
-   * 停止特定客戶端
-   * @param {string} clientName
+   * 重啟指定客戶端
+   * @param {string} name - 客戶端名稱
    */
-  stopClient(clientName) {
-    const clientInfo = this.clients.get(clientName);
-    if (clientInfo) {
-      clientInfo.client.stop();
-      this.clients.delete(clientName);
-      // 從 allTools 中移除該客戶端的工具
-      this.allTools = this.allTools.filter(
-        tool => tool.clientName !== clientName
-      );
-      log.info(`已停止客戶端 "${clientName}"`);
+  restartClient(name) {
+    const client = this.clients.get(name);
+    if (!client) {
+      log.warn(`客戶端 "${name}" 不存在`);
+      return;
     }
+
+    log.info(`重啟客戶端 "${name}"...`);
+
+    // 標記為未初始化
+    this._initializedClients.delete(name);
+
+    // 停止並重啟
+    client.stop();
+
+    // 延遲重啟以確保進程完全退出
+    setTimeout(() => {
+      try {
+        client.start();
+        client.sendInitialize();
+        log.info(`客戶端 "${name}" 已重啟`);
+      } catch (err) {
+        log.error(`重啟客戶端 "${name}" 失敗: ${err.message}`);
+      }
+    }, 1000);
   }
 
   /**
-   * 重啟特定客戶端
-   * @param {string} clientName
-   * @returns {Promise<void>}
+   * 重啟所有客戶端
    */
-  async restartClient(clientName) {
-    const serverConfig = this.servers.find(s => s.name === clientName);
-    if (!serverConfig) {
-      throw new Error(`找不到客戶端配置: ${clientName}`);
+  restartAll() {
+    for (const name of this.clients.keys()) {
+      this.restartClient(name);
     }
-
-    // 停止舊客戶端
-    this.stopClient(clientName);
-
-    // 重新啟動
-    await this._startClient(serverConfig);
-  }
-
-  /**
-   * 獲取狀態信息
-   * @returns {Object}
-   */
-  getStatus() {
-    const status = {
-      initialized: this._initialized,
-      totalClients: this.clients.size,
-      totalTools: this.allTools.length,
-      clients: {},
-    };
-
-    for (const [name, clientInfo] of this.clients) {
-      status.clients[name] = {
-        running: clientInfo.client.isRunning(),
-        toolsCount: clientInfo.tools.length,
-      };
-    }
-
-    return status;
   }
 }
-
-// 導出別名，保持與測試腳本一致
-export { McpServerAggregator as default };

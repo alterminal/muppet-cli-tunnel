@@ -1,7 +1,7 @@
 /**
- * McpServerAggregator 測試腳本
+ * MCPAggregator 測試腳本
  */
-import McpServerAggregator from "./McpServerAggregator.js";
+import MCPAggregator from "./MCPAggregator.js";
 import fs from "fs";
 import path from "path";
 
@@ -15,8 +15,8 @@ const log = {
 const configPath = path.resolve("./config/aggregate.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
-log.info("創建 McpServerAggregator 實例...");
-const aggregator = new McpServerAggregator({
+log.info("創建 MCPAggregator 實例...");
+const aggregator = new MCPAggregator({
   servers: config.servers,
 });
 

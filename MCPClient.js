@@ -296,10 +296,10 @@ export default class MCPClient {
   /**
    * 調用指定的工具
    * @param {string} name - 工具名稱
-   * @param {object} arguments - 工具參數
+   * @param {object} args - 工具參數
    * @returns {Promise<object>} 工具執行結果
    */
-  callTool(name, arguments = {}) {
+  callTool(name, args = {}) {
     return new Promise((resolve, reject) => {
       const id = ++this._requestId;
       this._pendingRequests.set(id, { resolve, reject });
@@ -310,7 +310,7 @@ export default class MCPClient {
         method: "tools/call",
         params: {
           name,
-          arguments,
+          args,
         },
       });
 

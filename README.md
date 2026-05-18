@@ -9,6 +9,7 @@
 - 🛡️ **身份驗證** - 支持 ID 和 Secret Key 的連接驗證
 - ⚡ **輕量級** - 依賴簡潔，運行高效
 - 📁 **配置文件支持** - 支持 JSON 配置文件，命令行參數可覆蓋配置
+- 🖥️ **聚合器模式** - 支持通過單一隧道連接管理多個 MCP 服務器
 
 ## 安裝
 
@@ -29,7 +30,9 @@ npm install
 
 ## 使用方法
 
-### 方式一：使用配置文件（推薦）
+### 方式一：單一 MCP 服務器模式
+
+#### 配置文件方式
 
 創建 `config.json` 文件：
 
@@ -57,11 +60,64 @@ npm install
 node index.js
 ```
 
-### 方式二：使用命令行參數
+#### 命令行方式
 
 ```bash
 node index.js --id <UUID> --key <SECRET_KEY> -- <MCP_SERVER_COMMAND>
 ```
+
+### 方式二：聚合器模式（多 MCP 服務器）
+
+聚合器模式允許通過單一 WebSocket 隧道連接管理多個 MCP 服務器。當客戶端調用工具時，聚合器會根據工具名稱自動將請求分發到正確的 MCP 服務器。
+
+#### 配置文件方式
+
+創建包含 `servers` 數組的配置文件：
+
+```json
+{
+  "id": "your-tunnel-id-uuid",
+  "secret_key": "your-secret-key",
+  "aggregator": {
+    "serverUrl": "wss://www.alterminal.com/mcps/tunnels/websocket",
+    "maxReconnectAttempts": 10,
+    "reconnectDelay": 3000,
+    "pingInterval": 30000,
+    "maxMissedPongs": 3
+  },
+  "servers": [
+    {
+      "name": "filesystem",
+      "cmd": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+    },
+    {
+      "name": "sqlite",
+      "cmd": ["npx", "-y", "@modelcontextprotocol/server-sqlite", "/path/to/db.db"]
+    }
+  ]
+}
+```
+
+然後運行：
+
+```bash
+node index.js -c ./example/aggregator/aggregator.json
+```
+
+#### 聚合器模式配置說明
+
+| 字段 | 類型 | 說明 |
+|------|------|------|
+| `id` | string | 隧道 ID (UUID) |
+| `secret_key` | string | Secret Key |
+| `aggregator.serverUrl` | string | WebSocket 服務器 URL |
+| `aggregator.maxReconnectAttempts` | number | 最大重連次數（默認: 10）|
+| `aggregator.reconnectDelay` | number | 重連延遲毫秒數（默認: 3000）|
+| `aggregator.pingInterval` | number | Ping 間隔毫秒數（默認: 30000）|
+| `aggregator.maxMissedPongs` | number | 最大丟失 Pong 次數（默認: 3）|
+| `servers` | array | MCP 服務器配置數組 |
+| `servers[].name` | string | 服務器名稱（唯一標識）|
+| `servers[].cmd` | array | 要執行的命令 |
 
 ### 方式三：指定自定義配置文件
 
@@ -82,34 +138,31 @@ node index.js -c /path/to/custom-config.json
 
 ### 配置選項
 
-| 配置項                 | 命令行參數              | 說明                 | 默認值                                            |
+| 配置項 | 命令行參數 | 說明 | 默認值 |
 | ---------------------- | ----------------------- | -------------------- | ------------------------------------------------- |
-| `id`                   | `--id`                  | 連接 ID (UUID 格式)  | 必填                                              |
-| `secret_key`           | `--key`, `--secret-key` | 密鑰，用於身份驗證   | 必填                                              |
-| `cmd`                  | `--` 後的命令           | MCP 服務器啟動命令   | 必填                                              |
-| `serverUrl`            | `--server-url`          | WebSocket 服務器地址 | `wss://www.alterminal.com/mcps/tunnels/websocket` |
-| `maxReconnectAttempts` | `--max-reconnect`       | 最大重連次數         | `10`                                              |
-| `reconnectDelay`       | `--reconnect-delay`     | 重連延遲（毫秒）     | `3000`                                            |
-| `pingInterval`         | `--ping-interval`       | Ping 間隔（毫秒）    | `30000`                                           |
-| `maxMissedPongs`       | `--max-missed-pongs`    | 最大丟失 Pong 次數   | `3`                                               |
-| -                      | `--config`, `-c`        | 自定義配置文件路徑   | `config.json`                                     |
+| `id` | `--id` | 連接 ID (UUID 格式) | 必填 |
+| `secret_key` | `--key`, `--secret-key` | 密鑰，用於身份驗證 | 必填 |
+| `cmd` | `--` 後的命令 | MCP 服務器啟動命令（單一模式） | 必填（單一模式） |
+| `serverUrl` | `--server-url` | WebSocket 服務器地址 | `wss://www.alterminal.com/mcps/tunnels/websocket` |
+| `maxReconnectAttempts` | `--max-reconnect` | 最大重連次數 | `10` |
+| `reconnectDelay` | `--reconnect-delay` | 重連延遲（毫秒） | `3000` |
+| `pingInterval` | `--ping-interval` | Ping 間隔（毫秒） | `30000` |
+| `maxMissedPongs` | `--max-missed-pongs` | 最大丟失 Pong 次數 | `3` |
+| `-` | `--config`, `-c` | 自定義配置文件路徑 | `config.json` |
 
 ### 使用示例
 
-#### 文件系統 MCP 服務器（配置文件方式）
+#### 文件系統 MCP 服務器（單一模式）
 
 ```bash
-# 先編輯 config.json 填入配置
-node index.js
+node index.js --id <UUID> --key <SECRET_KEY> -- npx -y @modelcontextprotocol/server-filesystem /path
 ```
 
-#### 文件系統 MCP 服務器（命令行方式）
+#### 多 MCP 服務器（聚合器模式）
 
 ```bash
-node index.js \
-  --id <UUID> \
-  --key <SECRET_KEY> \
-  -- npx -y @modelcontextprotocol/server-filesystem <allow path>
+# 使用示例配置
+node index.js -c ./example/aggregator/aggregator.json
 ```
 
 #### SQLite MCP 服務器
@@ -124,6 +177,8 @@ node index.js \
 
 ## 工作原理
 
+### 單一模式
+
 1. **建立連接** - 使用提供的 ID 和 Key 連接到 WebSocket 服務器
 2. **啟動 MCP 服務器** - 執行指定的 MCP 服務器命令作為子進程
 3. **消息轉發** -
@@ -131,15 +186,30 @@ node index.js \
    - 將 WebSocket 接收到的消息寫入 MCP 服務器的 stdin
 4. **心跳檢測** - 每 30 秒發送一次 ping 消息保持連接
 
+### 聚合器模式
+
+1. **建立連接** - 使用提供的 ID 和 Key 連接到 WebSocket 服務器
+2. **啟動多個 MCP 服務器** - 根據 `servers` 配置啟動多個 MCP 服務器
+3. **工具發現** - 每個 MCP 服務器初始化後，聚合器收集並緩存所有工具
+4. **請求分發** - 接收 `tools/call` 請求，根據工具名稱分發到對應的 MCP 服務器
+5. **返回結果** - 將工具執行結果通過 WebSocket 返回給客戶端
+
 ## 項目結構
 
 ```
 muppet-cli-tunnel/
-├── index.js          # 主入口文件
-├── config.json       # 配置文件（可自定義）
-├── package.json      # 項目配置
-├── README.md         # 本文檔
-└── pnpm-lock.yaml    # 依賴鎖定文件
+├── index.js                        # 主入口文件
+├── MCPClient.js                    # MCP 客戶端（單一 MCP 服務器）
+├── MCPAggregator.js                # MCP 聚合器（多 MCP 服務器）
+├── MCPWebSocketClient.js           # WebSocket 客戶端（單一模式）
+├── MCPWebSocketAggregatorClient.js # WebSocket 客戶端（聚合器模式）
+├── config.json                     # 配置文件（可自定義）
+├── package.json                    # 項目配置
+├── README.md                       # 本文檔
+└── example/                        # 示例配置
+    ├── cli/
+    ├── filesystem/
+    └── aggregator/
 ```
 
 ## 依賴項
@@ -164,14 +234,16 @@ muppet-cli-tunnel/
 - 檢查網絡連接穩定性
 - 查看服務器日誌獲取詳細錯誤信息
 
-### 範例
+## 範例
 
-- [cli](./example/cli/README.md)
-- [filesystem](./example/filesystem/README.md)
+- [CLI 模式](./example/cli/README.md) - 使用 CLI MCP 服務器
+- [Filesystem 模式](./example/filesystem/README.md) - 使用文件系統 MCP 服務器
+- [聚合器模式](./example/aggregator/README.md) - 使用多個 MCP 服務器
 
 ## 開發計劃
 
 - [x] 支持配置文件方式啟動
+- [x] 支持聚合器模式（多 MCP 服務器）
 - [ ] 添加日誌級別控制
 - [x] 支持重連機制
 - [ ] 添加 TLS/SSL 支持

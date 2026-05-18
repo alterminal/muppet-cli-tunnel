@@ -3,6 +3,7 @@ import parseArgs from "minimist";
 import path from "path";
 import readline from "readline";
 import MCPWebSocketClient from "./MCPWebSocketClient.js";
+import MCPWebSocketAggregatorClient from "./MCPWebSocketAggregatorClient.js";
 
 // 日誌工具函數，統一日誌格式
 const log = {
@@ -53,6 +54,7 @@ function mergeConfig(fileConfig, cliArgs, envConfig) {
   };
 
   return {
+    // 通用配置
     id: pick(cliArgs.id, envConfig.id, fileConfig.id),
     secret_key: pick(
       cliArgs.key,
@@ -61,19 +63,6 @@ function mergeConfig(fileConfig, cliArgs, envConfig) {
       fileConfig.secret_key,
       fileConfig.secretKey,
     ),
-    cmd: cliArgs._ && cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
-    maxReconnectAttempts: pick(
-      cliArgs.maxReconnect,
-      cliArgs["max-reconnect"],
-      fileConfig.maxReconnectAttempts,
-      10,
-    ),
-    reconnectDelay: pick(
-      cliArgs.reconnectDelay,
-      cliArgs["reconnect-delay"],
-      fileConfig.reconnectDelay,
-      3000,
-    ),
     serverUrl: pick(
       cliArgs.serverUrl,
       cliArgs["server-url"],
@@ -81,18 +70,39 @@ function mergeConfig(fileConfig, cliArgs, envConfig) {
       fileConfig.serverUrl,
       "wss://www.alterminal.com/mcps/tunnels/websocket",
     ),
+    maxReconnectAttempts: pick(
+      cliArgs.maxReconnect,
+      cliArgs["max-reconnect"],
+      fileConfig.maxReconnectAttempts,
+      fileConfig.aggregator?.maxReconnectAttempts,
+      10,
+    ),
+    reconnectDelay: pick(
+      cliArgs.reconnectDelay,
+      cliArgs["reconnect-delay"],
+      fileConfig.reconnectDelay,
+      fileConfig.aggregator?.reconnectDelay,
+      3000,
+    ),
     pingInterval: pick(
       cliArgs.pingInterval,
       cliArgs["ping-interval"],
       fileConfig.pingInterval,
+      fileConfig.aggregator?.pingInterval,
       30000,
     ),
     maxMissedPongs: pick(
       cliArgs.maxMissedPongs,
       cliArgs["max-missed-pongs"],
       fileConfig.maxMissedPongs,
+      fileConfig.aggregator?.maxMissedPongs,
       3,
     ),
+    // 單一命令模式
+    cmd: cliArgs._ && cliArgs._.length > 0 ? cliArgs._ : fileConfig.cmd || [],
+    // 聚合器模式
+    servers: fileConfig.servers || [],
+    useAggregator: fileConfig.servers && fileConfig.servers.length > 0,
   };
 }
 
@@ -115,6 +125,10 @@ Muppet CLI Tunnel - MCP WebSocket 隧道客戶端
   -h, --help              顯示此幫助信息
   -v, --version           顯示版本號
 
+模式:
+  單一命令模式: 提供 [命令...] 參數，連接單一 MCP 服務器
+  聚合器模式:   使用包含 servers 數組的配置文件
+
 環境變量:
   MUPPET_CONFIG           配置文件路徑
   MUPPET_ID               隧道 ID
@@ -122,8 +136,14 @@ Muppet CLI Tunnel - MCP WebSocket 隧道客戶端
   MUPPET_SERVER_URL       WebSocket 服務器 URL
 
 示例:
+  # 單一命令模式
   node index.js -c ./my-config.json
   node index.js -c /etc/muppet/config.json --id xxx --secret-key yyy node server.js
+
+  # 聚合器模式
+  node index.js -c ./example/aggregator/aggregator.json
+
+  # 使用環境變量
   MUPPET_CONFIG=./prod.json node index.js
 `);
 }
@@ -220,26 +240,12 @@ async function main() {
 
   // 合併配置
   const config = mergeConfig(fileConfig, args, envConfig);
-  let finalCmd = config.cmd;
 
   // 創建 readline 接口用於標準輸入
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
-
-  // 如果沒有提供命令，詢問用戶輸入
-  if (!Array.isArray(finalCmd) || finalCmd.length === 0) {
-    const cmdInput = await askQuestion(rl, "請輸入要執行的命令: ");
-    if (!cmdInput) {
-      log.error("錯誤: 命令不能為空");
-      rl.close();
-      process.exit(1);
-    }
-    finalCmd = cmdInput.trim().split(/\s+/);
-  }
-
-  log.info(`執行的命令: ${finalCmd.join(" ")}`);
 
   let id = config.id;
   let secretKey = config.secret_key;
@@ -266,16 +272,68 @@ async function main() {
 
   rl.close();
 
-  const client = new MCPWebSocketClient({
-    id,
-    secret_key: secretKey,
-    cmd: finalCmd,
-    maxReconnectAttempts: config.maxReconnectAttempts,
-    reconnectDelay: config.reconnectDelay,
-    serverUrl: config.serverUrl,
-    pingInterval: config.pingInterval,
-    maxMissedPongs: config.maxMissedPongs,
-  });
+  let client;
+
+  // 判斷使用哪種模式：聚合器模式 或 單一命令模式
+  if (config.useAggregator) {
+    // 聚合器模式
+    log.info(`使用聚合器模式，${config.servers.length} 個服務器`);
+    for (const server of config.servers) {
+      log.info(`  - ${server.name}: ${server.cmd.join(" ")}`);
+    }
+
+    client = new MCPWebSocketAggregatorClient({
+      id,
+      secretKey,
+      serverUrl: config.serverUrl,
+      maxReconnectAttempts: config.maxReconnectAttempts,
+      reconnectDelay: config.reconnectDelay,
+      pingInterval: config.pingInterval,
+      maxMissedPongs: config.maxMissedPongs,
+      servers: config.servers,
+    });
+
+    // 設置聚合器事件監聽
+    client.on("clientinitialized", (clientName, tools) => {
+      log.info(`  → ${clientName} 已就緒 (${tools.length} 個工具)`);
+    });
+
+    client.on("allclientsready", (clientNames, tools) => {
+      log.info(`所有 ${clientNames.length} 個客戶端已就緒，總共 ${tools.length} 個工具`);
+    });
+  } else {
+    // 單一命令模式
+    let finalCmd = config.cmd;
+
+    // 如果沒有提供命令，詢問用戶輸入
+    if (!Array.isArray(finalCmd) || finalCmd.length === 0) {
+      const rl2 = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      const cmdInput = await askQuestion(rl2, "請輸入要執行的命令: ");
+      rl2.close();
+      
+      if (!cmdInput) {
+        log.error("錯誤: 命令不能為空");
+        process.exit(1);
+      }
+      finalCmd = cmdInput.trim().split(/\s+/);
+    }
+
+    log.info(`使用單一命令模式，執行的命令: ${finalCmd.join(" ")}`);
+
+    client = new MCPWebSocketClient({
+      id,
+      secret_key: secretKey,
+      cmd: finalCmd,
+      maxReconnectAttempts: config.maxReconnectAttempts,
+      reconnectDelay: config.reconnectDelay,
+      serverUrl: config.serverUrl,
+      pingInterval: config.pingInterval,
+      maxMissedPongs: config.maxMissedPongs,
+    });
+  }
 
   // 優雅關閉處理
   setupGracefulShutdown(client);

@@ -1,0 +1,30 @@
+{
+  "comment": "MCP WebSocket 隧道配置文件 - 聚合器模式示例",
+  "id": "eeaa7e08-7887-4044-9a27-e2753a99b3e5",
+  "secret_key": "helloworld",
+  "aggregator": {
+    "serverUrl": "ws://localhost:4000/mcps/tunnels/websocket",
+    "maxReconnectAttempts": 10,
+    "reconnectDelay": 3000,
+    "pingInterval": 30000,
+    "maxMissedPongs": 3
+  },
+  "servers": [
+    {
+      "name": "filesystem",
+      "cmd": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ydc3148/alter"
+      ]
+    },
+    {
+      "name": "cli",
+      "cmd": [
+        "uvx",
+        "cli-mcp-server"
+      ]
+    }
+  ]
+}

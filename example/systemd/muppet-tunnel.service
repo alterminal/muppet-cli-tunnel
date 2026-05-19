@@ -1,0 +1,41 @@
+[Unit]
+Description=Muppet CLI Tunnel - MCP WebSocket Tunnel Client
+Documentation=https://github.com/your-repo/muppet-cli-tunnel
+After=network.target
+
+[Service]
+Type=simple
+# 使用 Node.js 運行應用程序
+ExecStart=/usr/bin/env node /home/ydc3148/alter/muppet-cli-tunnel/index.js -c /home/ydc3148/alter/muppet-cli-tunnel/config/config.json
+# 停止信號超時時間
+TimeoutStopSec=30
+
+# 重啟策略：意外退出時自動重啟
+Restart=on-failure
+# 重啟延遲
+RestartSec=5
+
+# 運行動作的用戶和組（建議創建專用用戶）
+# User=muppet
+# Group=muppet
+
+# 工作目錄
+WorkingDirectory=/home/ydc3148/alter/muppet-cli-tunnel
+
+# 環境變量（可選）
+# Environment="NODE_ENV=production"
+# Environment="MUPPET_SERVER_URL=wss://www.alterminal.com/mcps/tunnels/websocket"
+
+# 標準輸出重定向到 journald（日誌）
+StandardOutput=journal
+StandardError=journal
+
+# 保持環境變量繼承
+Environment=NODE_OPTIONS="--preserve-symlinks-main"
+
+# 安全相關：禁用核心轉儲
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

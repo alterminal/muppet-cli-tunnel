@@ -1,0 +1,42 @@
+[Unit]
+Description=Muppet CLI Tunnel (Aggregator Mode) - MCP WebSocket Tunnel Client
+Documentation=https://github.com/your-repo/muppet-cli-tunnel
+After=network.target
+
+[Service]
+Type=simple
+
+# 使用 Node.js 運行應用程序
+# 可以通過 EnvironmentFile 加載環境變量
+ExecStart=/usr/bin/env node /home/ydc3148/alter/muppet-cli-tunnel/index.js \
+    -c /home/ydc3148/alter/muppet-cli-tunnel/config/aggregate.json
+
+# 停止信號超時時間
+TimeoutStopSec=30
+
+# 重啟策略：總是重啟（適合作為長期運行的服務）
+Restart=always
+# 重啟延遲
+RestartSec=10
+
+# 工作目錄
+WorkingDirectory=/home/ydc3148/alter/muppet-cli-tunnel
+
+# 可選：環境變量文件
+# EnvironmentFile=/etc/muppet-cli-tunnel/env/muppet-tunnel.env
+
+# 日誌配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=muppet-tunnel
+
+# 安全相關
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+# CPU 和內存限制（根據實際需求調整）
+# CPUQuota=50%
+# MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
